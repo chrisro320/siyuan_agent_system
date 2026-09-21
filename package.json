@@ -1,0 +1,20 @@
+{
+  "name": "siyuan-agent-system",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "bun --watch src/server/index.ts",
+    "start": "bun src/server/index.ts",
+    "build": "bun scripts/build.ts",
+    "typecheck": "tsc --noEmit",
+    "lint": "biome check src web scripts tests",
+    "format": "biome check --write src web scripts tests"
+  },
+  "dependencies": { "zod": "4.1.12" },
+  "devDependencies": {
+    "@biomejs/biome": "2.3.0",
+    "@types/bun": "1.3.0",
+    "typescript": "5.9.3"
+  }
+}

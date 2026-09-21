@@ -1,0 +1,11 @@
+.git
+.trellis
+.omp
+.env*
+secrets
+*.key
+*.pem
+data
+node_modules
+dist
+coverage

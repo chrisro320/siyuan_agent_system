@@ -1,0 +1,6 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend review baseline"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend review baseline"}
+{"file": ".trellis/tasks/09-21-siyuan-agent-system-v1/prd.md", "reason": "Requirements and observable acceptance criteria"}
+{"file": ".trellis/tasks/09-21-siyuan-agent-system-v1/design.md", "reason": "Provider and publication invariants"}
+{"file": ".trellis/spec/backend/runtime-contracts.md", "reason": "Implemented provider, storage, publication and fault-recovery contracts"}
+{"file": ".trellis/spec/frontend/control-panel.md", "reason": "Implemented browser lifecycle, dirty-state and live-detail contracts"}

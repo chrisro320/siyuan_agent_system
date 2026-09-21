@@ -1,0 +1,5 @@
+{"file": ".trellis/spec/backend/index.md", "reason": "Backend guideline index"}
+{"file": ".trellis/spec/frontend/index.md", "reason": "Frontend guideline index"}
+{"file": ".trellis/tasks/09-21-siyuan-agent-system-v1/design.md", "reason": "Provider contracts and cross-layer design"}
+{"file": ".trellis/spec/backend/runtime-contracts.md", "reason": "Shared runtime and durable publication invariants"}
+{"file": ".trellis/spec/frontend/control-panel.md", "reason": "Control panel lifecycle and shared API contracts"}

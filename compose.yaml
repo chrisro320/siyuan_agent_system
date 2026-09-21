@@ -1,0 +1,32 @@
+services:
+  agent:
+    build: .
+    restart: unless-stopped
+    init: true
+    stop_grace_period: 150s
+    ports:
+      - "127.0.0.1:${PORT:-8787}:8787"
+    environment:
+      PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:${PORT:-8787}}
+      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
+      OLLAMA_API_KEY_FILE: ${OLLAMA_API_KEY_FILE:-}
+      TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
+      TYPESAFE_API_KEY_FILE: ${TYPESAFE_API_KEY_FILE:-}
+      SIYUAN_URL: ${SIYUAN_URL:-}
+      SIYUAN_PUBLIC_URL: ${SIYUAN_PUBLIC_URL:-}
+      SIYUAN_TOKEN: ${SIYUAN_TOKEN:-}
+      SIYUAN_TOKEN_FILE: ${SIYUAN_TOKEN_FILE:-}
+      OMP_ALLOWED_ROOTS: /sources/omp
+    volumes:
+      - agent-data:/data
+      - ./secrets:/run/secrets:ro
+      - ${OMP_SESSIONS_DIR:-./data/empty-sources}:/sources/omp:ro
+    extra_hosts:
+      - "host.docker.internal:host-gateway"
+    healthcheck:
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://localhost:8787/health');process.exit(r.ok?0:1)"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+volumes:
+  agent-data:

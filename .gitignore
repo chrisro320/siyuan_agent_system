@@ -1,1 +1,10 @@
 .trellis/workspace/*/journal-*.log
+.env*
+!.env.example
+*.key
+*.pem
+secrets/
+data/
+node_modules/
+dist/
+coverage/

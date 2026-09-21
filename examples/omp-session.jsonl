@@ -1,0 +1,3 @@
+{"type":"session","version":3,"id":"synthetic-omp-example","cwd":"/synthetic/demo","timestamp":"2026-09-21T00:00:00.000Z"}
+{"type":"message","id":"message-1","parentId":null,"timestamp":"2026-09-21T00:01:00.000Z","message":{"role":"user","content":[{"type":"text","text":"已確認的專案規則：保留所有來源版本。再次匯入完全相同內容不得多建筆記；舊訊息修正則保留新版本與舊版本的追溯關係。"}]}}
+{"type":"message","id":"message-2","parentId":"message-1","timestamp":"2026-09-21T00:02:00.000Z","message":{"role":"assistant","content":[{"type":"text","text":"以來源命名空間、會話識別碼與內容摘要區分來源、版本、工作及寫入操作，不能用同一個去重鍵代替所有概念。"}]}}

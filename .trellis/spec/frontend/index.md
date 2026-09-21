@@ -6,7 +6,7 @@
 
 ## Overview
 
-This directory contains guidelines for frontend development. Fill in each file with your project's specific conventions.
+Read [Control Panel Contracts](./control-panel.md) before frontend changes. It records the implemented DOM, shared schema, polling, dirty-state, and publication-link behavior. The older topic files below remain templates, not completed project specifications.
 
 ---
 
@@ -14,6 +14,7 @@ This directory contains guidelines for frontend development. Fill in each file w
 
 | Guide | Description | Status |
 |-------|-------------|--------|
+| [Control Panel Contracts](./control-panel.md) | Executable browser lifecycle and state contracts | Implemented |
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
 | [Component Guidelines](./component-guidelines.md) | Component patterns, props, composition | To fill |
 | [Hook Guidelines](./hook-guidelines.md) | Custom hooks, data fetching patterns | To fill |
@@ -37,3 +38,7 @@ The goal is to help AI assistants and new team members understand how YOUR proje
 ---
 
 **Language**: All documentation should be written in **English**.
+
+## Quality Check
+
+Follow Control Panel Contracts §6. Run typecheck, build, and lint, then exercise the actual browser: cold load, first-request failure/recovery, unsaved drafts, repeated saves, live candidate updates, and real SiYuan links. Repeat its built-in grep checks at review and delivery.

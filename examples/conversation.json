@@ -1,0 +1,33 @@
+{
+  "schemaVersion": 1,
+  "source": "example-chat",
+  "sourceSessionId": "durable-write-demo",
+  "projectId": "demo",
+  "startedAt": null,
+  "sourceLocator": null,
+  "messages": [
+    {
+      "sourceMessageId": "decision-1",
+      "parentId": null,
+      "role": "user",
+      "timestamp": null,
+      "text": "專案已確認：對外寫入必須先保存操作識別碼，網路逾時後先查回原目標，再決定是否重試。不能因為沒收到回應就重複追加內容。此規則已在三次回應遺失測試中驗證。",
+      "attachments": [],
+      "rawLocator": "messages/0",
+      "missing": ["timestamp"],
+      "truncated": false
+    },
+    {
+      "sourceMessageId": "decision-2",
+      "parentId": "decision-1",
+      "role": "assistant",
+      "timestamp": null,
+      "text": "適用範圍是具備可查回目標識別碼的外部寫入服務。若無法查證原操作是否成功，應標示待確認，不能自動重播。",
+      "attachments": [],
+      "rawLocator": "messages/1",
+      "missing": ["timestamp"],
+      "truncated": false
+    }
+  ],
+  "warnings": ["Synthetic example; no real conversation data."]
+}

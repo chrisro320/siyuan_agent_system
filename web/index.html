@@ -1,0 +1,49 @@
+<!doctype html>
+<html lang="zh-Hant">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1" />
+    <meta name="color-scheme" content="light dark" />
+    <title>SiYuan 知識蒸餾控制面板</title>
+    <link rel="stylesheet" href="/style.css" />
+  </head>
+  <body>
+    <a class="skip-link" href="#panel-region">跳至主要內容</a>
+    <div class="app">
+      <header class="app-header">
+        <div class="brand">
+          <h1>SiYuan 知識蒸餾控制面板</h1>
+          <p class="brand-sub">匯入對話、抽取候選、由 Jev 決定保留，並發佈到 SiYuan</p>
+        </div>
+        <div class="header-status">
+          <p id="connection-status" class="connection" role="status">正在連線到後端…</p>
+          <p class="hint">雲端處理提示：抽取與心智維護使用 Ollama Cloud，保留判定使用 TypeSafe Jev。憑據只存放在伺服器端。</p>
+        </div>
+      </header>
+
+      <div class="app-body">
+        <nav class="app-nav" aria-label="控制面板區段">
+          <h2 class="nav-heading">區段</h2>
+          <ul id="nav-list" class="nav-list"></ul>
+          <div class="nav-foot">
+            <p id="mutation-status" class="hint" role="status"></p>
+            <button id="refresh-button" type="button" class="btn btn-ghost">立即重新整理</button>
+          </div>
+        </nav>
+
+        <main id="panel-region" class="app-main" tabindex="-1">
+          <div id="notice-region" class="notice-region" aria-live="polite"></div>
+          <div id="panel-host" class="panel-host">
+            <p class="loading">正在載入概覽資料…</p>
+          </div>
+        </main>
+      </div>
+    </div>
+
+    <noscript>
+      <p>此控制面板需要啟用 JavaScript 才能與後端 API 互動。</p>
+    </noscript>
+
+    <script type="module" src="/main.js"></script>
+  </body>
+</html>

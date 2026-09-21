@@ -6,7 +6,7 @@
 
 ## Overview
 
-This directory contains guidelines for backend development. Fill in each file with your project's specific conventions.
+Read [Runtime Contracts](./runtime-contracts.md) before backend changes. It records the implemented source, storage, provider, publication, HTTP, and deployment boundaries. The older topic files below remain templates; they are not evidence of a completed full spec bootstrap.
 
 ---
 
@@ -14,6 +14,7 @@ This directory contains guidelines for backend development. Fill in each file wi
 
 | Guide | Description | Status |
 |-------|-------------|--------|
+| [Runtime Contracts](./runtime-contracts.md) | Executable backend contracts, failure matrix, and real-service verification | Implemented |
 | [Directory Structure](./directory-structure.md) | Module organization and file layout | To fill |
 | [Database Guidelines](./database-guidelines.md) | ORM patterns, queries, migrations | To fill |
 | [Error Handling](./error-handling.md) | Error types, handling strategies | To fill |
@@ -36,3 +37,7 @@ The goal is to help AI assistants and new team members understand how YOUR proje
 ---
 
 **Language**: All documentation should be written in **English**.
+
+## Quality Check
+
+Follow Runtime Contracts §6. Run typecheck, behavior tests, build, and lint; repeat its built-in grep checks at review and delivery. SiYuan serializer or recovery changes also require an isolated real read-back/lost-response probe. Never substitute passing mocks for that evidence.
