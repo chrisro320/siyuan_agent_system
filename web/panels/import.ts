@@ -139,7 +139,7 @@ export function createImportPanel(ctx: AppContext): Surface {
       }),
       labelled("來源格式", formatSelect),
       labelled("專案 ID", projectInput),
-      hint("專案 ID 是候選與心智卡的歸屬鍵。不同來源使用同一個專案 ID 時會共用專案心智卡。"),
+      hint("專案 ID 是候選與已發佈知識的歸屬鍵。不同來源使用同一個專案 ID 時會歸入同一個專案。"),
       labelled("來源標記", sourceInput),
       hint("預設 manual。OMP 請維持預設，不要拿內容裡的文字當來源標記。"),
       labelled("來源 session ID（可留空）", sessionInput),

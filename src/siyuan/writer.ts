@@ -46,19 +46,31 @@ function attribute(value: string): string {
     .replace(/[\r\n]/g, " ");
 }
 
-function nextFence(line: string, current: string | null): string | null {
+/** 圍籬以引用層級與 marker 配對；開頭與收尾的合法縮排可不同。 */
+interface Fence {
+  quoteDepth: number;
+  marker: string;
+}
+
+function nextFence(line: string, current: Fence | null): Fence | null {
+  const prefix = /^((?: {0,3}>)+ {0,3}| {0,3})/.exec(line)?.[0] ?? "";
+  let quoteDepth = 0;
+  for (const character of prefix) if (character === ">") quoteDepth += 1;
+  const content = line.slice(prefix.length);
   if (current) {
-    const close = /^ {0,3}(`+|~+)[ \t]*$/.exec(line)?.[1];
-    return close && close[0] === current[0] && close.length >= current.length ? null : current;
+    const close = /^(`+|~+)[ \t]*$/.exec(content)?.[1];
+    if (!close || quoteDepth !== current.quoteDepth || close[0] !== current.marker[0])
+      return current;
+    return close.length >= current.marker.length ? null : current;
   }
-  const open = /^ {0,3}(`{3,}|~{3,})(.*)$/.exec(line);
+  const open = /^(`{3,}|~{3,})(.*)$/.exec(content);
   if (!open?.[1] || (open[1][0] === "`" && open[2]?.includes("`"))) return null;
-  return open[1];
+  return { quoteDepth, marker: open[1] };
 }
 
 /** Generated text cannot escape its owned superblock or assign foreign block IDs. */
 function checkedMarkdown(markdown: string): string {
-  let fence: string | null = null;
+  let fence: Fence | null = null;
   for (const line of markdown.split(/\r?\n/)) {
     const inside = fence !== null;
     fence = nextFence(line, fence);
@@ -81,9 +93,61 @@ function checkedMarkdown(markdown: string): string {
   return markdown.trim();
 }
 
-/** Only SiYuan-generated IALs outside fenced code are omitted during first read-back. */
+/**
+ * 思源在行內程式碼邊界補上的零寬空格（U+200B）。
+ *
+ * Lute 產生 Protyle DOM 時會在行內程式碼的收尾標記後固定補一個零寬空格
+ * （`render/protyle_renderer.go` 的 `renderCodeSpanCloseMarker`），再於讀回的行內程式碼
+ * 開頭前留下一個；使用者原本緊貼程式碼邊界的零寬空格則會被保留或被吃掉。因此「緊貼
+ * 行內程式碼邊界的零寬空格」在儲存後分不出是使用者寫的還是思源補的。
+ */
+const ZWSP = "\u200b";
+
+/** 去掉緊貼行內程式碼邊界的 U+200B；程式碼內容與其他位置的零寬空格一律保留。 */
+function withoutCodeBoundaryZwsp(line: string): string {
+  if (!line.includes(ZWSP)) return line;
+  const runs: { start: number; end: number; escaped: boolean }[] = [];
+  for (let index = 0; index < line.length; ) {
+    if (line[index] !== "`") {
+      index += 1;
+      continue;
+    }
+    let slashes = 0;
+    for (let before = index - 1; before >= 0 && line[before] === "\\"; before -= 1) slashes += 1;
+    let end = index;
+    while (end < line.length && line[end] === "`") end += 1;
+    // `\`` 是跳脫後的字面反引號，不是行內程式碼的開頭。
+    runs.push({ start: index, end, escaped: slashes % 2 === 1 });
+    index = end;
+  }
+  const dropped = new Set<number>();
+  let open: { start: number; end: number } | null = null;
+  for (const run of runs) {
+    if (!open) {
+      if (!run.escaped) open = run;
+      continue;
+    }
+    // 收尾的反引號長度必須與開頭完全相同，否則那一段只是程式碼內容。
+    if (run.end - run.start !== open.end - open.start) continue;
+    for (let index = open.start - 1; index >= 0 && line[index] === ZWSP; index -= 1)
+      dropped.add(index);
+    for (let index = run.end; index < line.length && line[index] === ZWSP; index += 1)
+      dropped.add(index);
+    open = null;
+  }
+  if (dropped.size === 0) return line;
+  let result = "";
+  for (let index = 0; index < line.length; index += 1)
+    if (!dropped.has(index)) result += line[index];
+  return result;
+}
+
+/**
+ * Only SiYuan-generated IALs and inline-code boundary zero-width spaces outside fenced code
+ * are omitted during first read-back.
+ */
 export function canonicalMarkdown(markdown: string): string {
-  let fence: string | null = null;
+  let fence: Fence | null = null;
   const lines: string[] = [];
   const input = markdown.replace(/\r\n/g, "\n").split("\n");
   const ialLine = /^\s*(?:>\s*)*\{:(?:[^{}"]|"[^"]*")*\}\s*$/;
@@ -97,7 +161,7 @@ export function canonicalMarkdown(markdown: string): string {
     if (ialLine.test(line)) continue;
     // SiYuan emits an empty quote marker immediately before its blockquote IAL.
     if (/^(?:\s*>)+\s*$/.test(line) && ialLine.test(input[index + 1] ?? "")) continue;
-    lines.push(line.replace(/\{:(?:[^{}"]|"[^"]*")*\}/g, ""));
+    lines.push(withoutCodeBoundaryZwsp(line.replace(/\{:(?:[^{}"]|"[^"]*")*\}/g, "")));
   }
   return lines.join("\n").replace(/\n+$/, "");
 }
@@ -181,7 +245,7 @@ export class SiyuanWriter {
     const blockId = nodeId(`block:${id}`, now);
     const path = appendDocumentId
       ? destination.rootPath
-      : `${rootScope(destination.rootPath)}/${segment(candidate.projectId)}/${segment(candidate.draft.topic)}/${candidate.draft.kind}/${segment(candidate.draft.title)}-${id.slice(0, 8)}`;
+      : `${rootScope(destination.rootPath)}/${segment(candidate.projectId)}/${segment(candidate.draft.topic)}/${segment(candidate.draft.title)}-${id.slice(0, 8)}`;
     const attrs: Record<string, string> = {
       id: blockId,
       [AGENT_ATTR.owner]: AGENT_OWNER,
@@ -244,7 +308,7 @@ export class SiyuanWriter {
       block.rootId !== operation.documentId ||
       block.notebookId !== operation.notebookId ||
       !withinRoot(block.hpath, rootScope(operation.rootPath)) ||
-      (operation.kind === "create" && block.hpath !== operation.path)
+      (!operation.receipt && operation.kind === "create" && block.hpath !== operation.path)
     ) {
       this.conflict(operation, "目標已離開原先的受管位置，已停止寫入或撤回。");
     }
@@ -289,8 +353,15 @@ export class SiyuanWriter {
           this.client.renderMarkdown(actual),
           this.client.renderMarkdown(expected),
         ]);
-        if (actualHtml !== expectedHtml)
-          this.conflict(operation, "思源讀回內容與原先寫入計畫不同，已停止後續處理。");
+        if (actualHtml !== expectedHtml) {
+          const nativeMarkdown = await this.client.getTextMarkKramdown(block.id);
+          const nativeHtml = await this.client.renderMarkdown(
+            canonicalMarkdown(nativeMarkdown),
+            true,
+          );
+          if (nativeHtml !== expectedHtml)
+            this.conflict(operation, "思源讀回內容與原先寫入計畫不同，已停止後續處理。");
+        }
       }
     }
     if (operation.kind === "create") {

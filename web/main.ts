@@ -6,7 +6,6 @@ import { ApiError, fetchOverview } from "./api";
 import type { AppContext, AppState, Surface } from "./context";
 import { button, type Child, el, notice } from "./dom";
 import { createImportPanel } from "./panels/import";
-import { createMentalPanel } from "./panels/mental";
 import { createOverviewPanel } from "./panels/overview";
 import { createReviewPanel } from "./panels/review";
 import { createSettingsPanel } from "./panels/settings";
@@ -67,7 +66,7 @@ function selectPanel(panelId: string): void {
   }
   const surface = surfaces.find((item) => item.id === panelId);
   if (surface === undefined) return;
-  document.title = `${surface.title}｜SiYuan 知識蒸餾控制面板`;
+  document.title = `${surface.title}｜SiYuan 知識整理與發布面板`;
   surface.activated?.();
   renderActiveSurface();
   window.location.hash = panelId;
@@ -202,7 +201,6 @@ function boot(): void {
     createOverviewPanel(ctx),
     createImportPanel(ctx),
     createReviewPanel(ctx),
-    createMentalPanel(ctx),
     createSettingsPanel(ctx),
   );
 

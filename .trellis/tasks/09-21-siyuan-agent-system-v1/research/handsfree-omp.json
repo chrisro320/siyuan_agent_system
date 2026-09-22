@@ -1,0 +1,32 @@
+{
+  "date": "2026-09-21",
+  "installedPackage": "@oh-my-pi/pi-coding-agent@18.2.3",
+  "packageRoot": "/home/chris/.bun/install/global/node_modules/@oh-my-pi/pi-coding-agent",
+  "catalogCaution": "cli-catalog returned 18.1.5 with stale:false; the actual installed package.json:4 is 18.2.3. Reported the discrepancy; trust inspected source for this integration.",
+  "evidence": [
+    {"file":"src/extensibility/extensions/types.ts:788-806,1154-1190","fact":"before_agent_start exposes prompt/images/systemPrompt; context returns messages; before_provider_request handles an unknown provider-specific payload."},
+    {"file":"src/extensibility/extensions/runner.ts:1637-1705","fact":"context runs against a cloned message view. Modified per-call messages are marked, not written into original session history. This seam cannot change the toolset or systemPrompt."},
+    {"file":"src/extensibility/shared-events.ts:192-202","fact":"agent_end.willContinue means a continuation is already scheduled and is not a user-visible terminal settle."},
+    {"file":"src/session/agent-session.ts:3476-3490,4313-4318,6795-6880,6999-7003","fact":"agent_end notification is detached. before_agent_start also runs for automatic continuations; it cannot alone identify a new human turn."},
+    {"file":"src/session/agent-session.ts:2991-3023","fact":"A before_agent_start custom message is persisted. This is not the selected injection mechanism because it adds a message and has provider-dependent developer-role mapping."},
+    {"file":"src/session/date-cwd-reminder.ts:35-60","fact":"Existing host pattern freezes per-user-message text with a persistent anchor derived from role/timestamp/pre-injection content hash."},
+    {"file":"/mnt/data/Projects/siyuan/.omp/extensions/trellis/index.ts:609-720","fact":"The existing project extension uses persistent user-message anchors for contextual injection. Reuse the behavior pattern; do not edit the Trellis extension."},
+    {"file":"/home/chris/.omp/agent/extensions/jev-memory-gate.ts:1020-1037,1245-1265","fact":"Root/subagent filtering uses sessionFile and parentSession layout, not parentSession alone. Skip unclassifiable in-memory sessions and willContinue notifications."},
+    {"file":"src/extensibility/extensions/loader.ts:561-604","fact":"Project/user extension discovery supports disabledExtensions capability IDs; configured extension names are matched as extension-module:<name>. Existing settings and unrelated extensions must be preserved."},
+    {"file":"src/hindsight/config.ts:111-178","fact":"HINDSIGHT_AUTO_RECALL and HINDSIGHT_AUTO_RETAIN override project settings. mentalModelsEnabled is read from settings. Do not assume a YAML false defeats an environment override."}
+  ],
+  "adapterDecision": {
+    "capture": "agent_end with willContinue false, root-only, original user/assistant text on the active branch. Atomically persist a durable outbox entry before network delivery. Replay only enabled authorized project entries; acknowledgements advance durable state.",
+    "recallPreparation": "Use a bounded pre-turn request without cloud inference. before_agent_start may stage the result, but a stage is not permission to inject: bind it only to the matching new genuine user-message anchor.",
+    "injection": "context applies a frozen snapshot in the user-message data view. Reapply prior persisted anchors identically; create an anchor only for the actual new human message. Never add a transient tail message or rewrite provider-specific payloads.",
+    "emptySnapshot": "Persist explicit empty/timeout anchor outcomes too. Otherwise service recovery during a tool follow-up could insert new text into an already-sent user message.",
+    "storage": "Anchor snapshots and capture delivery state are separate concerns with protected local files. Original session text remains unchanged. Never collect the anchor/recall view as new evidence.",
+    "cutover": "At a fresh project session boundary, preserve task role bindings and configure hindsight.autoRecall:false, hindsight.autoRetain:false, hindsight.mentalModelsEnabled:false. Disable the existing jev-memory-gate extension for this project to prevent optional Seam B ownership. Verify effective settings/environment; if another automatic owner remains enabled, refuse SiYuan activation rather than run both. Do not erase Hindsight data or alter unrelated projects."
+  },
+  "smokeBoundary": {
+    "isolation": "Use a separate PI_CODING_AGENT_DIR and session directory; do not copy the native live auth/database. Explicit extension loading with --no-extensions avoids unrelated global extensions.",
+    "loadOnly": "omp models --json -e <adapter> --no-extensions can exercise real loading without a generation request; this does not prove capture or recall.",
+    "endToEnd": "Run actual persisted sandboxed OMP conversations with the approved synthetic cloud-provider setup, then verify real service ingestion/SiYuan output and outgoing recall context. Do NOT pass --no-session for capture proof: unclassifiable in-memory sessions are intentionally skipped.",
+    "notYetExecuted": "No OMP adapter exists or has been loaded/exercised by this planning increment. The source inspection is not an execution claim."
+  }
+}

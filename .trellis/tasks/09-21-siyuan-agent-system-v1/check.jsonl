@@ -4,3 +4,5 @@
 {"file": ".trellis/tasks/09-21-siyuan-agent-system-v1/design.md", "reason": "Provider and publication invariants"}
 {"file": ".trellis/spec/backend/runtime-contracts.md", "reason": "Implemented provider, storage, publication and fault-recovery contracts"}
 {"file": ".trellis/spec/frontend/control-panel.md", "reason": "Implemented browser lifecycle, dirty-state and live-detail contracts"}
+{"file": ".trellis/tasks/09-21-siyuan-agent-system-v1/research/handsfree-service.json", "reason": "Review automatic capture/recall against verified host/origin, scope, freshness, and search contracts"}
+{"file": ".trellis/tasks/09-21-siyuan-agent-system-v1/research/handsfree-omp.json", "reason": "Review genuine-user anchors, explicit empty snapshots, continuation/subagent exclusions, and single-owner project cutover"}

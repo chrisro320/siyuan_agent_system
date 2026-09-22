@@ -1,4 +1,4 @@
-/* SiYuan 知識蒸餾控制面板樣式。桌面為側欄+主內容，窄螢幕改為單欄堆疊。
+/* SiYuan 知識整理與發布面板樣式。桌面為側欄+主內容，窄螢幕改為單欄堆疊。
    顏色以 CSS 變數定義，同步支援淺色與深色偏好。 */
 
 :root {
@@ -258,7 +258,6 @@ a {
 }
 
 .row-card,
-.mental-block,
 .operation-block,
 .evidence-block {
   border: 1px solid var(--border);
@@ -266,10 +265,6 @@ a {
   padding: 10px 12px;
   margin-top: 10px;
   background: var(--bg-sunken);
-}
-
-.mental-block.proposal {
-  border-color: var(--warn);
 }
 
 .row-head {
@@ -371,16 +366,6 @@ a {
 
 .btn-ghost {
   background: transparent;
-}
-
-.link-button {
-  font: inherit;
-  background: none;
-  border: none;
-  padding: 0;
-  color: var(--accent);
-  text-decoration: underline;
-  cursor: pointer;
 }
 
 .field {
@@ -686,41 +671,6 @@ textarea {
 
 .md-link {
   word-break: break-all;
-}
-
-.mental-section {
-  margin: 8px 0;
-}
-
-.claim {
-  border-left: 3px solid var(--border-strong);
-  padding-left: 10px;
-  margin: 6px 0;
-}
-
-.claim-text {
-  margin: 0 0 2px;
-}
-
-.history-entry {
-  border-top: 1px solid var(--border);
-  padding-top: 8px;
-  margin-top: 8px;
-}
-
-.editor-slot:empty {
-  display: none;
-}
-
-.editor-card {
-  border-color: var(--accent);
-  box-shadow: 0 0 0 1px var(--accent);
-}
-
-.mental-list {
-  display: flex;
-  flex-direction: column;
-  gap: var(--gap);
 }
 
 details > summary {

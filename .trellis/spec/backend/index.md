@@ -6,7 +6,7 @@
 
 ## Overview
 
-Read [Runtime Contracts](./runtime-contracts.md) before backend changes. It records the implemented source, storage, provider, publication, HTTP, and deployment boundaries. The older topic files below remain templates; they are not evidence of a completed full spec bootstrap.
+Read [Runtime Contracts](./runtime-contracts.md) before backend changes. It records source, storage, providers, human-readable publication, HTTP, OMP background capture, explicit knowledge search, Hindsight coexistence, and deployment boundaries. The older topic files below remain templates; they are not evidence of a completed full spec bootstrap.
 
 ---
 

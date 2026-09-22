@@ -7,7 +7,6 @@ import {
   errorInfoSchema,
   type ImportRequest,
   importResultSchema,
-  type MentalContent,
   type Notebook,
   notebooksSchema,
   type Overview,
@@ -177,24 +176,6 @@ export async function reviewCandidate(
     body,
   });
   return parseContract(reviewResultSchema, payload, "候選修正");
-}
-
-export async function saveMentalEdit(
-  projectId: string,
-  baseRevision: number,
-  content: MentalContent,
-): Promise<void> {
-  await send(`/api/projects/${encodeURIComponent(projectId)}/mental`, {
-    method: "PUT",
-    body: { baseRevision, content },
-  });
-}
-
-export async function acceptMental(cardId: string, baseRevision: number): Promise<void> {
-  await send(`/api/mental/${encodeURIComponent(cardId)}/accept`, {
-    method: "POST",
-    body: { baseRevision },
-  });
 }
 
 export async function undoOperation(operationId: string): Promise<void> {

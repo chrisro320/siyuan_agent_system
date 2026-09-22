@@ -7,7 +7,6 @@ import {
   type Candidate,
   type Conversation,
   type ImportRequest,
-  type MentalCard,
   type Operation,
 } from "../src/contracts/index.ts";
 import {
@@ -125,28 +124,6 @@ function buildOperation(overrides: Partial<Operation> = {}): Operation {
     error: null,
     createdAt: timestamp,
     updatedAt: timestamp,
-    ...overrides,
-  };
-}
-
-function buildMental(overrides: Partial<MentalCard> = {}): MentalCard {
-  return {
-    id: "mental-1",
-    projectId: "project-x",
-    revision: 1,
-    baseRevision: 0,
-    content: {
-      goals: [],
-      decisions: [{ text: "以內容摘要作為識別", sources: ["m2"] }],
-      constraints: [],
-      terminology: [],
-      superseded: [],
-    },
-    author: "model",
-    status: "active",
-    candidateId: null,
-    generation: null,
-    createdAt: now(),
     ...overrides,
   };
 }
@@ -616,7 +593,7 @@ describe("Store 候選版本與分段保存", () => {
   });
 });
 
-describe("Store 設定與心智卡版本", () => {
+describe("Store 設定版本", () => {
   let dataDir: string;
   let store: Store;
 
@@ -658,54 +635,6 @@ describe("Store 設定與心智卡版本", () => {
     expect(thrown).toBeInstanceOf(AppError);
     expect((thrown as AppError).status).toBe(404);
     expect(() => store.settings()).not.toThrow();
-  });
-
-  test("心智卡以預期基準做比較並拒絕過期寫入", async () => {
-    store.saveMental(buildMental(), 0);
-    expect(store.activeMental("project-x")?.revision).toBe(1);
-
-    expect(() => store.saveMental(buildMental({ id: "mental-stale", revision: 2 }), 0)).toThrow(
-      AppError,
-    );
-    expect(store.activeMental("project-x")?.id).toBe("mental-1");
-
-    // 生效版本必須緊接現行版本，跳號或重複一律拒絕。
-    expect(() =>
-      store.saveMental(buildMental({ id: "mental-skip", revision: 5, baseRevision: 1 }), 1),
-    ).toThrow(AppError);
-  });
-
-  test("提案不取代生效版本且歷史列不可覆寫", async () => {
-    store.saveMental(buildMental(), 0);
-    const proposal = buildMental({
-      id: "mental-proposal",
-      revision: 2,
-      baseRevision: 1,
-      status: "proposal",
-      author: "model",
-    });
-    store.saveMental(proposal, 1);
-
-    expect(store.activeMental("project-x")?.id).toBe("mental-1");
-    expect(store.mentalCards("project-x")).toHaveLength(2);
-
-    // 同一列完全相同視為無操作；即使基準已過期，重送已成功的寫入仍安全。
-    store.saveMental(proposal, 1);
-    expect(store.mentalCards("project-x")).toHaveLength(2);
-
-    store.saveMental(
-      buildMental({ id: "mental-2", revision: 2, baseRevision: 1, author: "human" }),
-      1,
-    );
-    store.saveMental(proposal, 1);
-    expect(store.mentalCards("project-x")).toHaveLength(3);
-    expect(store.activeMental("project-x")?.id).toBe("mental-2");
-    expect(store.activeMental("project-x")?.author).toBe("human");
-
-    expect(() => store.saveMental({ ...proposal, author: "human" }, 1)).toThrow(AppError);
-    expect(store.mentalCards("project-x").find((row) => row.id === "mental-proposal")?.author).toBe(
-      "model",
-    );
   });
 });
 

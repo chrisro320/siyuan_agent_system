@@ -6,7 +6,7 @@ description: |
   session) is responsible for persisting them to the task's research/
   directory.
 tools: read, find, search, web_search
-model: google-antigravity/gemini-3.7-flash:high
+model: "@smol"
 ---
 
 # Research Agent

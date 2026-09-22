@@ -35,7 +35,7 @@ function renderProviders(container: HTMLElement, overview: Overview): void {
       text: "僅顯示憑據是否存在；憑據本身只保存在伺服器端環境或秘密檔，永遠不會回傳到瀏覽器。",
     }),
     el("div", { class: "provider-list" }, [
-      providerRow("Ollama Cloud（抽取與心智維護）", overview.providers.ollamaConfigured),
+      providerRow("Ollama Cloud（抽取與知識整理）", overview.providers.ollamaConfigured),
       providerRow("TypeSafe Jev（保留判定）", overview.providers.jevConfigured),
       providerRow("SiYuan（發佈目的地）", overview.providers.siyuanConfigured),
     ]),

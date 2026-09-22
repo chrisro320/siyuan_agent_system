@@ -6,6 +6,7 @@ COPY tsconfig.json ./
 COPY src ./src
 COPY web ./web
 COPY scripts ./scripts
+COPY integrations ./integrations
 RUN bun run build
 
 FROM oven/bun:1.3.14

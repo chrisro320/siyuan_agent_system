@@ -4,7 +4,14 @@
 *.key
 *.pem
 secrets/
+# Local hands-free OMP integration: generated config/stub plus adapter state and token.
+.omp/config.yml
+.omp/siyuan-memory.json
+.omp/siyuan-memory.token
+.omp/siyuan-memory-state/
+.omp/extensions/siyuan-memory.ts
 data/
 node_modules/
 dist/
+/.dist-*/
 coverage/

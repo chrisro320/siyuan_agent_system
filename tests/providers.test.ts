@@ -1,11 +1,9 @@
 import { describe, expect, test } from "bun:test";
 import {
   AppError,
-  type Candidate,
   type CandidateDraft,
   type Conversation,
   defaultSettings,
-  emptyMental,
   GENERATION_MODEL,
   type SourceMessage,
 } from "../src/contracts/index.ts";
@@ -190,16 +188,14 @@ function judgeInput(
   overrides: Partial<{
     draft: JudgeArgs[0];
     messages: JudgeArgs[1];
-    mental: JudgeArgs[2];
-    related: JudgeArgs[3];
-    policy: JudgeArgs[4];
-    policyRevision: JudgeArgs[5];
+    related: JudgeArgs[2];
+    policy: JudgeArgs[3];
+    policyRevision: JudgeArgs[4];
   }> = {},
 ): JudgeArgs {
   return [
     overrides.draft ?? draft(),
     overrides.messages ?? conversation.messages,
-    overrides.mental ?? emptyMental(),
     overrides.related ?? [],
     overrides.policy ?? defaultSettings().policy,
     overrides.policyRevision ?? 7,
@@ -221,7 +217,7 @@ describe("OllamaClient.extract", () => {
     );
     const client = new OllamaClient({ apiKey: "test-key", fetch });
 
-    const result = await client.extract(conversation, emptyMental());
+    const result = await client.extract(conversation);
 
     expect(result.candidates).toHaveLength(1);
   });
@@ -237,7 +233,7 @@ describe("OllamaClient.extract", () => {
         }),
       );
       await expect(
-        new OllamaClient({ apiKey: "test-key", fetch }).extract(conversation, emptyMental()),
+        new OllamaClient({ apiKey: "test-key", fetch }).extract(conversation),
       ).rejects.toBeInstanceOf(AppError);
     }
   });
@@ -247,11 +243,11 @@ describe("OllamaClient.extract", () => {
       ollamaChatResponse(`\`\`\`json\n${JSON.stringify(validDraftPayload)}\n\`\`\``),
     );
     const fencedClient = new OllamaClient({ apiKey: "test-key", fetch: fenced.fetch });
-    expect((await fencedClient.extract(conversation, emptyMental())).candidates).toHaveLength(1);
+    expect((await fencedClient.extract(conversation)).candidates).toHaveLength(1);
 
     const partial = recordingFetch(() => ollamaChatResponse('{"candidates":[{"kind":"decision"'));
     const partialClient = new OllamaClient({ apiKey: "test-key", fetch: partial.fetch });
-    await expect(partialClient.extract(conversation, emptyMental())).rejects.toMatchObject({
+    await expect(partialClient.extract(conversation)).rejects.toMatchObject({
       code: "repair_exhausted",
     });
     // The truncated answer must never be salvaged into publishable content.
@@ -270,7 +266,7 @@ describe("OllamaClient.extract", () => {
     const { fetch, calls } = recordingFetch(() => ollamaChatResponse(JSON.stringify(fabricated)));
     const client = new OllamaClient({ apiKey: "test-key", fetch });
 
-    await expect(client.extract(conversation, emptyMental())).rejects.toMatchObject({
+    await expect(client.extract(conversation)).rejects.toMatchObject({
       code: "invalid_evidence",
     });
     // A fabricated anchor is offered one correction, then the job stops.
@@ -293,7 +289,7 @@ describe("OllamaClient.extract", () => {
     );
     const client = new OllamaClient({ apiKey: "test-key", fetch });
 
-    const result = await client.extract(conversation, emptyMental());
+    const result = await client.extract(conversation);
 
     expect(result.candidates[0]?.evidence[0]?.quote).toBe(EVIDENCE_TEXT);
     expect(calls).toHaveLength(2);
@@ -307,7 +303,7 @@ describe("OllamaClient.extract", () => {
     );
     const repairedClient = new OllamaClient({ apiKey: "test-key", fetch: repaired.fetch });
 
-    const result = await repairedClient.extract(conversation, emptyMental());
+    const result = await repairedClient.extract(conversation);
 
     expect(result.candidates).toHaveLength(1);
     expect(repaired.calls).toHaveLength(2);
@@ -315,7 +311,7 @@ describe("OllamaClient.extract", () => {
 
     const hopeless = recordingFetch(() => ollamaChatResponse("仍然不是 JSON"));
     const hopelessClient = new OllamaClient({ apiKey: "test-key", fetch: hopeless.fetch });
-    await expect(hopelessClient.extract(conversation, emptyMental())).rejects.toMatchObject({
+    await expect(hopelessClient.extract(conversation)).rejects.toMatchObject({
       code: "repair_exhausted",
     });
     expect(hopeless.calls).toHaveLength(2);
@@ -325,7 +321,7 @@ describe("OllamaClient.extract", () => {
     const { fetch, calls } = recordingFetch(() => ollamaChatResponse("{}"));
     const client = new OllamaClient({ apiKey: null, fetch });
 
-    await expect(client.extract(conversation, emptyMental())).rejects.toMatchObject({
+    await expect(client.extract(conversation)).rejects.toMatchObject({
       code: "provider_not_configured",
       retryable: false,
     });
@@ -340,62 +336,10 @@ describe("OllamaClient.extract", () => {
       messages: [sourceMessage("msg-1", "x".repeat(1_200_000))],
     };
 
-    await expect(client.extract(huge, emptyMental())).rejects.toMatchObject({
+    await expect(client.extract(huge)).rejects.toMatchObject({
       code: "input_too_large",
     });
     expect(calls).toHaveLength(0);
-  });
-});
-
-describe("OllamaClient.proposeMental", () => {
-  const retainedCandidate = {
-    id: "cand-1",
-    logicalId: "logical-1",
-    jobId: "job-1",
-    importId: "import-1",
-    projectId: "project-1",
-    draft: draft(),
-    generation: { model: GENERATION_MODEL, promptVersion: "extract-1", usage: {} },
-    judgment: null,
-    status: "ready",
-    operationId: null,
-    relatedIds: [],
-    version: 1,
-    createdAt: "2026-09-21T00:00:00Z",
-    updatedAt: "2026-09-21T00:00:00Z",
-  } as unknown as Candidate;
-
-  test("accepts sources drawn from the previous card and retained candidate ids", async () => {
-    const content = {
-      goals: [],
-      decisions: [{ text: "正式環境使用 PostgreSQL 16。", sources: ["cand-1"] }],
-      constraints: [],
-      terminology: [],
-      superseded: [],
-    };
-    const { fetch } = recordingFetch(() => ollamaChatResponse(JSON.stringify(content)));
-    const client = new OllamaClient({ apiKey: "test-key", fetch });
-
-    const result = await client.proposeMental(emptyMental(), [retainedCandidate]);
-
-    expect(result.content.decisions[0]?.sources).toEqual(["cand-1"]);
-    expect(result.meta.model).toBe(GENERATION_MODEL);
-  });
-
-  test("rejects a mental revision that cites a source never offered to the model", async () => {
-    const fabricated = {
-      goals: [],
-      decisions: [{ text: "正式環境使用 PostgreSQL 16。", sources: ["cand-999"] }],
-      constraints: [],
-      terminology: [],
-      superseded: [],
-    };
-    const { fetch } = recordingFetch(() => ollamaChatResponse(JSON.stringify(fabricated)));
-    const client = new OllamaClient({ apiKey: "test-key", fetch });
-
-    await expect(client.proposeMental(emptyMental(), [retainedCandidate])).rejects.toMatchObject({
-      code: "fabricated_source",
-    });
   });
 });
 
@@ -690,7 +634,6 @@ describe("JevClient.judge", () => {
     const judgment = await new JevClient({ apiKey: "test-key", fetch }).judge(
       draft(),
       [sourceMessage("msg-2", original)],
-      emptyMental(),
       [],
       defaultSettings().policy,
       0,
@@ -751,7 +694,7 @@ describe("provider transport", () => {
     }) as unknown as typeof globalThis.fetch;
     const client = new OllamaClient({ apiKey: "test-key", fetch: hanging, timeoutMs: 20 });
 
-    await expect(client.extract(conversation, emptyMental())).rejects.toMatchObject({
+    await expect(client.extract(conversation)).rejects.toMatchObject({
       code: "provider_timeout",
       retryable: true,
     });
@@ -769,7 +712,7 @@ describe("provider transport", () => {
         ),
       )) as typeof globalThis.fetch;
     const client = new OllamaClient({ apiKey: "test-key", fetch: streaming, timeoutMs: 20 });
-    await expect(client.extract(conversation, emptyMental())).rejects.toMatchObject({
+    await expect(client.extract(conversation)).rejects.toMatchObject({
       code: "provider_timeout",
       retryable: true,
     });
@@ -783,7 +726,7 @@ describe("provider transport", () => {
       fetch: invalid.fetch,
       onUsage: (meta) => usage.push(meta.usage),
     });
-    await expect(ollama.extract(conversation, emptyMental())).rejects.toMatchObject({
+    await expect(ollama.extract(conversation)).rejects.toMatchObject({
       code: "repair_exhausted",
     });
     expect(usage.reduce((sum, item) => sum + (item.eval_count ?? 0), 0)).toBe(160);

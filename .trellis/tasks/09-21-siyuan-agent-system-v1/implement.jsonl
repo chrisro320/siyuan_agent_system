@@ -3,3 +3,5 @@
 {"file": ".trellis/tasks/09-21-siyuan-agent-system-v1/design.md", "reason": "Provider contracts and cross-layer design"}
 {"file": ".trellis/spec/backend/runtime-contracts.md", "reason": "Shared runtime and durable publication invariants"}
 {"file": ".trellis/spec/frontend/control-panel.md", "reason": "Control panel lifecycle and shared API contracts"}
+{"file": ".trellis/tasks/09-21-siyuan-agent-system-v1/research/handsfree-service.json", "reason": "Verified service seams, scoped search probe, and incremental capture/recall boundaries"}
+{"file": ".trellis/tasks/09-21-siyuan-agent-system-v1/research/handsfree-omp.json", "reason": "OMP 18.2.3 event ordering, stable anchors, root-only capture, project memory ownership, and sandbox proof"}

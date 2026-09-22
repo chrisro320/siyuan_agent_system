@@ -1,0 +1,33 @@
+{
+  "date": "2026-09-21",
+  "scope": "Read-only research for PRD R10/R11; not implementation or real-data activation approval",
+  "confirmed": [
+    {"file":"src/server/app.ts:39-65,86-89","fact":"Host/Origin/JSON restrictions exist. An adapter using the configured local host and omitting Origin is not inherently blocked; retain these checks rather than bypassing them."},
+    {"file":"src/pipeline/worker.ts:420-448","fact":"Existing OMP polling feeds complete scanned inputs into ingestion; it is not a safe new-only activation mechanism."},
+    {"file":"src/siyuan/client.ts:186-233,455-479","fact":"related() is an internal candidate-based lookup over document rows. It is not a user-query recall endpoint and project attribute is one OR condition, not strict project authorization."},
+    {"file":"src/server/app.ts:280-342","fact":"Mental edits, proposal acceptance, and undo exist. There is no automatic chat recall endpoint."},
+    {"file":"/home/chris/.omp/agent/extensions/jev-memory-gate.ts:34-51,1245-1265","fact":"An existing global Hindsight gate supports optional agent_end capture; default mode is A. This source default is not proof of effective runtime environment."},
+    {"file":".omp/config.yml:1-8","fact":"Existing user-owned project configuration contains task role bindings; preserve them during any approved project-specific memory cutover."}
+  ],
+  "searchProbe": {
+    "method": "POST /api/search/fullTextSearchBlock",
+    "target": "http://127.0.0.1:16806 (isolated synthetic SiYuan)",
+    "requestBase": {"method":0,"paths":["20260921211444-o3ikhfa"],"page":1,"pageSize":5,"groupBy":0,"orderBy":0},
+    "results": [
+      {"query":"連接埠","httpStatus":200,"code":0,"matched":63,"returned":5,"blockTypes":["NodeDocument"]},
+      {"query":"65535","httpStatus":200,"code":0,"matched":41,"returned":5,"blockTypes":["NodeDocument","NodeHeading","NodeParagraph"]},
+      {"query":"HTTP","httpStatus":200,"code":0,"matched":111,"returned":5,"blockTypes":["NodeDocument"]}
+    ],
+    "limits": "Three read-only queries, not a recall-quality or latency benchmark. No new note, cloud call, or production access was performed.",
+    "source": "https://raw.githubusercontent.com/siyuan-note/siyuan/v3.8.4/kernel/api/search.go",
+    "pathContract": "parseSearchBlockRequest splits each paths item into notebook ID and internal document path. Returned path contains node IDs and .sy; it is not the human hPath. Never pass a human rootPath as an independent paths item. Strict destination/project/operation validation is still required after search."
+  },
+  "decisions": [
+    "Use a generic adapter capture/recall boundary and an OMP extension; do not patch OMP core or emulate the entire Hindsight API.",
+    "Use durable incremental capture identity and acknowledgement. Do not enable the existing whole-directory poller against private history for the new-only rollout.",
+    "Read current authorized SiYuan content for recall; derive withdrawn eligibility from operation states rather than inventing an independently maintained candidate status.",
+    "A manually edited owned note must not be replaced by stale generated text. Old mental claims dependent on changed or withdrawn source content must be omitted.",
+    "Do not claim vector/semantic retrieval from full-text query probes.",
+    "Project memory ownership must be explicit; no parallel automatic Hindsight and SiYuan capture/recall in the same enabled project. Unrelated projects remain unchanged."
+  ]
+}

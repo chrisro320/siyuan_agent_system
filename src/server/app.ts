@@ -1,22 +1,39 @@
+import { timingSafeEqual } from "node:crypto";
 import { z } from "zod";
 import {
   AppError,
   type Candidate,
   candidateDraftSchema,
+  captureRequestSchema,
   GENERATION_MODEL,
-  mentalEditSchema,
   type Overview,
   reviewRequestSchema,
+  searchRequestSchema,
   settingsSchema,
   uploadRequestSchema,
   validateEvidence,
-  validateMentalSources,
 } from "../contracts";
+import { acceptCapture, search } from "../memory";
 import { errorInfo, type Worker } from "../pipeline/worker";
 import { normalizeImport, redactConversation } from "../sources";
 import { digest } from "../storage/identity";
 import type { Store } from "../storage/store";
 import type { Config } from "./config";
+
+/**
+ * 常數時間比較轉接器憑據：內容長度不同即不同，長度相同才逐位比較，
+ * 避免用回應時間推測憑據內容。
+ */
+function matchesToken(provided: string, expected: string): boolean {
+  const left = Buffer.from(provided, "utf8");
+  const right = Buffer.from(expected, "utf8");
+  return left.length === right.length && timingSafeEqual(left, right);
+}
+
+/** 是否值得留下稽核紀錄：設定或授權的拒絕由回應即可觀察，不重複記錄。 */
+function observable(error: unknown): boolean {
+  return !(error instanceof AppError) || error.retryable || error.status >= 500;
+}
 
 export function createApp(
   config: Config,
@@ -24,6 +41,23 @@ export function createApp(
   worker: Worker,
 ): (request: Request) => Promise<Response> {
   const expected = new URL(config.publicOrigin);
+  const adapterToken = config.adapterToken?.trim() ?? "";
+  const adapterProjects = config.adapterProjects ?? [];
+  const authorizeAdapter = (request: Request): void => {
+    if (adapterToken === "") {
+      throw new AppError(
+        "adapter_not_configured",
+        "伺服器尚未設定擷取與搜尋的轉接器憑據，端點已停用。",
+        false,
+        503,
+      );
+    }
+    const header = request.headers.get("authorization")?.trim() ?? "";
+    const provided = /^Bearer[ \t]+(.+)$/i.exec(header)?.[1]?.trim() ?? "";
+    if (provided === "" || !matchesToken(provided, adapterToken)) {
+      throw new AppError("adapter_unauthorized", "轉接器憑據不正確。", false, 401);
+    }
+  };
   const headers = {
     "X-Content-Type-Options": "nosniff",
     "Referrer-Policy": "no-referrer",
@@ -63,6 +97,37 @@ export function createApp(
       ) {
         throw new AppError("json_required", "請使用 JSON 傳送資料。", false, 415);
       }
+      if (path === "/api/capture" && method === "POST") {
+        authorizeAdapter(request);
+        const input = captureRequestSchema.parse(await request.json());
+        try {
+          const result = await acceptCapture(store, adapterProjects, input);
+          return json(result, result.duplicate ? 200 : 201);
+        } catch (error) {
+          if (observable(error))
+            store.audit(
+              "capture.failed",
+              input.captureId,
+              error instanceof AppError ? error.code : "unexpected_failure",
+            );
+          throw error;
+        }
+      }
+      if (path === "/api/search" && method === "POST") {
+        authorizeAdapter(request);
+        const input = searchRequestSchema.parse(await request.json());
+        try {
+          return json(await search(store, worker.siyuan, adapterProjects, input));
+        } catch (error) {
+          if (observable(error))
+            store.audit(
+              "search.failed",
+              input.projectId,
+              error instanceof AppError ? error.code : "unexpected_failure",
+            );
+          throw error;
+        }
+      }
       if (path === "/api/overview" && method === "GET") {
         const overview: Overview = {
           providers: {
@@ -77,7 +142,6 @@ export function createApp(
           jobs: store.jobs(),
           candidates: store.candidates(),
           operations: store.operations(),
-          mentalCards: store.mentalCards(),
           audit: store.audits(),
           sources: store.sourceHealth(),
         };
@@ -276,60 +340,6 @@ export function createApp(
             return { jobId: job.id };
           }),
         );
-      }
-      const mentalMatch = path.match(/^\/api\/projects\/([^/]+)\/mental$/);
-      if (mentalMatch?.[1] && method === "PUT") {
-        const projectId = decodeURIComponent(mentalMatch[1]);
-        const input = mentalEditSchema.parse(await request.json());
-        validateMentalSources(input.content, projectId, store.candidates());
-        store.saveMental(
-          {
-            id: crypto.randomUUID(),
-            projectId,
-            revision: input.baseRevision + 1,
-            baseRevision: input.baseRevision,
-            content: input.content,
-            author: "human",
-            status: "active",
-            candidateId: null,
-            generation: null,
-            createdAt: new Date().toISOString(),
-          },
-          input.baseRevision,
-        );
-        store.audit("mental-human-edit", projectId, `base:${input.baseRevision}`);
-        return json({ ok: true });
-      }
-      const acceptMatch = path.match(/^\/api\/mental\/([^/]+)\/accept$/);
-      if (acceptMatch?.[1] && method === "POST") {
-        const input = z.object({ baseRevision: z.number().int() }).parse(await request.json());
-        const proposal = store
-          .mentalCards()
-          .find((card) => card.id === decodeURIComponent(acceptMatch[1] ?? ""));
-        if (!proposal || proposal.status !== "proposal")
-          throw new AppError("proposal_missing", "心智提案不存在。", false, 404);
-        if (proposal.baseRevision !== input.baseRevision)
-          throw new AppError(
-            "revision_conflict",
-            "此提案基於舊版本，請人工合併，不得直接覆蓋。",
-            false,
-            409,
-          );
-        validateMentalSources(proposal.content, proposal.projectId, store.candidates());
-        store.saveMental(
-          {
-            ...proposal,
-            id: crypto.randomUUID(),
-            revision: input.baseRevision + 1,
-            author: "human",
-            status: "active",
-            candidateId: null,
-            createdAt: new Date().toISOString(),
-          },
-          input.baseRevision,
-        );
-        store.audit("mental-accepted", proposal.id, `base:${input.baseRevision}`);
-        return json({ ok: true });
       }
       const undoMatch = path.match(/^\/api\/operations\/([^/]+)\/undo$/);
       if (undoMatch?.[1] && method === "POST") {

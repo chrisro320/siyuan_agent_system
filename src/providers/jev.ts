@@ -4,7 +4,6 @@ import {
   type CandidateDraft,
   type Judgment,
   judgmentSchema,
-  type MentalContent,
   type Policy,
   type RelatedNote,
   type SourceMessage,
@@ -164,7 +163,6 @@ export class JevClient {
   async judge(
     draft: CandidateDraft,
     messages: SourceMessage[],
-    mental: MentalContent,
     related: RelatedNote[],
     policy: Policy,
     policyRevision: number,
@@ -200,7 +198,7 @@ export class JevClient {
         instructions: [
           "這個候選是否值得長期保留，並可自動發布到知識庫？",
           "`candidate` 僅是候選的摘要；只有 `evidence` 中逐字引用 `cited_messages` 的部分才算證據。",
-          "evidence 未涵蓋的內容一律視為沒有依據；`related_notes` 與 `prior_mental` 只用來判斷重複、矛盾與既有決策。",
+          "evidence 未涵蓋的內容一律視為沒有依據；`related_notes` 只用來判斷重複、矛盾與既有決策。",
           "遵守 `policy` 的額外指示。",
         ].join("\n"),
         criteria: {
@@ -218,8 +216,11 @@ export class JevClient {
       },
       [JEV_QUESTION_IDS.sensitivity]: {
         type: "noul",
-        instructions:
-          "`candidate` 或 `evidence` 是否含有憑據、金鑰、私密個資、客戶資料或內部主機路徑等不應長期保存於知識庫的內容？",
+        instructions: [
+          "這一題只判斷本次 `candidate`、`evidence` 與 `cited_messages`：其中是否含有憑據、金鑰、私密個資、客戶資料或內部主機路徑等不應長期保存於知識庫的內容？",
+          "`related_notes` 是既有參考資料，不是本次候選內容；其中的來源附錄、控制面板連結、主機位址或其他內容不計入本題。",
+          "若本次候選或原始證據本身含有敏感內容，仍必須判為 true。",
+        ].join(""),
         criteria: {
           true: "含有上述任一類敏感內容，或可能因此造成外洩風險。",
           false: "只有一般的技術與專案內容，沒有敏感資訊。",
@@ -228,12 +229,11 @@ export class JevClient {
       [JEV_QUESTION_IDS.informationStatus]: {
         type: "choice",
         instructions:
-          "`candidate` 的主張本身是已確認、仍不確定，或與 `related_notes` 或 `prior_mental` 的說法互相衝突？",
+          "`candidate` 的主張本身是已確認、仍不確定，或與 `related_notes` 的說法互相衝突？",
         criteria: {
-          confirmed:
-            "`cited_messages` 明確支持，且在 `related_notes` 或 `prior_mental` 中沒有相反說法。",
+          confirmed: "`cited_messages` 明確支持，且在 `related_notes` 中沒有相反說法。",
           uncertain: "證據不足、屬於推測、或缺少關鍵細節。",
-          conflicting: "與 `related_notes`、`prior_mental` 或 evidence 內其他說法互相矛盾。",
+          conflicting: "與 `related_notes` 或 evidence 內其他說法互相矛盾。",
         },
       },
       [JEV_QUESTION_IDS.domain]: {
@@ -307,7 +307,6 @@ export class JevClient {
         candidate: draft,
         evidence,
         cited_messages: citedMessages,
-        prior_mental: mental,
         related_notes: related,
         policy: policy,
       },

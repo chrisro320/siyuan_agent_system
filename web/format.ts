@@ -144,24 +144,6 @@ export function describeJudgmentAction(value: string): Described {
   return lookup(JUDGMENT_ACTION, value, "建議動作");
 }
 
-const AUTHOR: Record<string, Described> = {
-  model: { label: "模型產生", tone: "info" },
-  human: { label: "人工修訂", tone: "ok" },
-};
-
-export function describeAuthor(value: string): Described {
-  return lookup(AUTHOR, value, "作者");
-}
-
-const CARD_STATUS: Record<string, Described> = {
-  active: { label: "生效中", tone: "ok" },
-  proposal: { label: "提案（未生效）", tone: "warn" },
-};
-
-export function describeCardStatus(value: string): Described {
-  return lookup(CARD_STATUS, value, "心智卡狀態");
-}
-
 // 供表格使用的鍵值摘要：任何 unknown 值都以 JSON 文字呈現，不執行任何 HTML。
 export function stringifyValue(value: unknown): string {
   if (value === null || value === undefined) return "—";

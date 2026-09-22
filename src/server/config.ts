@@ -13,6 +13,14 @@ export interface Config {
   siyuanPublicUrl?: string;
   siyuanToken: string | null;
   allowedOmpRoots: string[];
+  /**
+   * 自動擷取與顯式搜尋轉接器的伺服器端憑據與專案允許清單。
+   *
+   * 兩者都是選填：未設定即代表本機的擷取／搜尋端點停用，既有面板與手動匯入
+   * 完全不受影響。因此既有設定物件（例如測試夾具）不需要提供這些欄位。
+   */
+  adapterToken?: string | null;
+  adapterProjects?: string[];
 }
 
 async function secret(env: NodeJS.ProcessEnv, name: string): Promise<string | null> {
@@ -80,5 +88,10 @@ export async function loadConfig(env: NodeJS.ProcessEnv = process.env): Promise<
       .map((root) => root.trim())
       .filter(Boolean)
       .map((root) => resolve(root)),
+    adapterToken: await secret(env, "ADAPTER_TOKEN"),
+    adapterProjects: (env.ADAPTER_PROJECTS ?? "")
+      .split(",")
+      .map((projectId) => projectId.trim())
+      .filter(Boolean),
   };
 }

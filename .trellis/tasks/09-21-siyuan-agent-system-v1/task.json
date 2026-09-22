@@ -2,7 +2,7 @@
   "id": "siyuan-agent-system-v1",
   "name": "siyuan-agent-system-v1",
   "title": "SiYuan Agent System 第一版",
-  "description": "Build a source-independent Docker knowledge service and web panel for SiYuan. Use Ollama Cloud deepseek-v4.1-flash for extraction and mental-context maintenance, with Jev owning retention decisions.",
+  "description": "Build a human-facing SiYuan knowledge publishing service with DeepSeek extraction and Jev publication judgment. Preserve Hindsight as primary LLM memory; SiYuan lookup is explicit only, with no automatic recall or parallel mental models.",
   "status": "in_progress",
   "dev_type": null,
   "scope": null,
@@ -12,7 +12,7 @@
   "assignee": "chris",
   "createdAt": "2026-09-21",
   "completedAt": null,
-  "branch": null,
+  "branch": "task/siyuan-agent-system-v1",
   "base_branch": "master",
   "worktree_path": null,
   "commit": null,
@@ -21,6 +21,12 @@
   "children": [],
   "parent": null,
   "relatedFiles": [],
-  "notes": "Implementation and AC1–AC11 verified with synthetic cloud calls and isolated SiYuan v3.8.4. Specs updated. User approved the scoped Phase 3.4 local work commit; no push/archive. Existing .omp changes excluded. See implement.md for evidence and operational limits.",
-  "meta": {}
+  "notes": "Formally paused at the user's request on 2026-09-22 for maintenance by another LLM. The implemented baseline is verified: 211 tests, typecheck/build/lint, real production publication/search, Hindsight coexistence and flattened project/topic/article hierarchy. Keep status in_progress and do not archive. The user authorized a task-branch checkpoint, push to chrisro320/siyuan_agent_system, public repository visibility, and SiYuan retrospective publication. Read the current handoff and RESUME anchor at the top of implement.md; historical automatic recall and mental-model plans are superseded. Production/runtime data and credentials remain local and ignored.",
+  "meta": {
+    "paused": true,
+    "pausedAt": "2026-09-22",
+    "resumeStep": "maintenance-intake",
+    "resumeDocument": "implement.md",
+    "pauseReason": "Verified baseline handed off for future maintenance and upgrades."
+  }
 }

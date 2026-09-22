@@ -15,7 +15,7 @@ Required for `web/` changes. The UI is Traditional Chinese, dependency-light DOM
 
 ## 3. Contracts
 
-All five surfaces remain mounted. `.panel[hidden] { display: none; }` must override panel layout declarations; setting the DOM `hidden` property alone does not beat an authored `display: flex`. Remove the initial loading placeholder when installing surfaces. After an initial overview failure, a successful retry must restore the actual surfaces, not only the connection banner.
+Four human-facing surfaces remain mounted: overview, import/sources, candidate review, and settings/operation history. There is no mental-card panel or API; `Overview` has no `mentalCards`. Hindsight owns automatic LLM memory, and this panel must not describe publication as replacing it. `.panel[hidden] { display: none; }` overrides panel layout declarations. Remove the initial loading placeholder; after initial overview failure, a successful retry restores the actual surfaces.
 
 Polling is every five seconds. Each panel controls safe updates. Persist unsent inputs independently of fetched state; dirty means a baseline comparison. Another tab's settings revision shows a stale warning and preserves the draft. Reload explicitly discards it after confirmation. A saved settings response becomes the new baseline, so an immediate second save succeeds.
 
@@ -29,7 +29,7 @@ Render source excerpts, full normalized originals, source/message identifiers, m
 
 | Condition | UI behavior |
 | --- | --- |
-| Initial `/api/overview` failure | Visible error and retry; success remounts all five surfaces |
+| Initial `/api/overview` failure | Visible error and retry; success remounts all four surfaces |
 | Unknown/malformed API response | `contract_mismatch`; no fake success |
 | Notebook failure or delayed load | Visible retry; typed destination survives completion |
 | External settings revision with local edits | Stale warning and preserved draft; backend CAS rejects overwrite |
@@ -54,8 +54,9 @@ Run `bun run typecheck`, `bun run build`, and `bun run lint`. The actual browser
 3. Notebook request fails then succeeds while an input is dirty; the input survives.
 4. Two consecutive settings saves use current revisions; a second tab's revision preserves the first tab's draft.
 5. Correction selects the new ID, background state changes appear, and evidence expands to the original message/locator.
-6. Import, retry, manual mental edit, and opening the actual SiYuan note work through the panel.
+6. Import, retry, candidate correction, and opening the actual SiYuan note work through the panel.
 7. Provider keys are absent from UI/API payloads. Scan in memory and print only pass/fail or paths, never matching values.
+8. Exactly four navigation entries are present; legacy `#mental` falls back to overview. No mental-card endpoint is requested. Historical source text may mention mental models; that does not make it an active UI feature.
 
 Machine checks with the built-in `grep` tool:
 

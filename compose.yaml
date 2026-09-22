@@ -17,6 +17,9 @@ services:
       SIYUAN_TOKEN: ${SIYUAN_TOKEN:-}
       SIYUAN_TOKEN_FILE: ${SIYUAN_TOKEN_FILE:-}
       OMP_ALLOWED_ROOTS: /sources/omp
+      ADAPTER_TOKEN: ${ADAPTER_TOKEN:-}
+      ADAPTER_TOKEN_FILE: ${ADAPTER_TOKEN_FILE:-}
+      ADAPTER_PROJECTS: ${ADAPTER_PROJECTS:-}
     volumes:
       - agent-data:/data
       - ./secrets:/run/secrets:ro

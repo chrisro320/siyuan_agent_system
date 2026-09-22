@@ -6,7 +6,6 @@ import {
   AppError,
   type CandidateDraft,
   type Conversation,
-  emptyMental,
   GENERATION_MODEL,
   type Judgment,
   PROMPT_VERSION,
@@ -212,107 +211,6 @@ test("cross-origin actions are rejected and overview never contains server crede
   );
   expect(unknownSource.status).toBe(400);
   expect(store.settings().ompRoots).toEqual([]);
-});
-
-test("manual mental context is not overwritten by a generated update", async () => {
-  const { store, worker } = setup();
-  const { job } = await ingest(store, conversation("Confirmed rule."));
-  const now = new Date().toISOString();
-  store.saveMental(
-    {
-      id: "manual-card",
-      projectId: "test",
-      revision: 1,
-      baseRevision: 0,
-      content: {
-        ...emptyMental(),
-        constraints: [{ text: "Keep my manual constraint.", sources: ["candidate"] }],
-      },
-      author: "human",
-      status: "active",
-      candidateId: null,
-      generation: null,
-      createdAt: now,
-    },
-    0,
-  );
-  store.saveCandidate({
-    id: "candidate",
-    logicalId: "logical",
-    jobId: job.id,
-    importId: job.importId,
-    projectId: "test",
-    draft: draft("Confirmed rule."),
-    generation: meta,
-    judgment: { ...archive, disposition: "retain" },
-    status: "published",
-    operationId: null,
-    relatedIds: [],
-    version: 1,
-    createdAt: now,
-    updatedAt: now,
-  });
-  store.saveJob({ ...job, extractionComplete: true });
-  worker.ollama.proposeMental = async () => ({
-    content: { ...emptyMental(), decisions: [{ text: "New decision", sources: ["candidate"] }] },
-    meta,
-  });
-  await worker.tick();
-  expect(store.activeMental("test")?.content.constraints[0]?.text).toBe(
-    "Keep my manual constraint.",
-  );
-  const proposal = store.mentalCards("test").find((card) => card.status === "proposal");
-  expect(proposal?.baseRevision).toBe(1);
-  expect(proposal?.content.decisions[0]?.sources).toEqual(["candidate"]);
-});
-
-test("generated cards cannot silently change an existing claim's category and evidence", async () => {
-  const { store, worker } = setup();
-  const { job } = await ingest(store, conversation("Confirmed rule."));
-  const now = new Date().toISOString();
-  for (const candidateId of ["earlier", "later"]) {
-    store.saveCandidate({
-      id: candidateId,
-      logicalId: candidateId,
-      jobId: job.id,
-      importId: job.importId,
-      projectId: "test",
-      draft: draft("Confirmed rule."),
-      generation: meta,
-      judgment: { ...archive, disposition: "retain" },
-      status: "published",
-      operationId: null,
-      relatedIds: [],
-      version: 1,
-      createdAt: now,
-      updatedAt: now,
-    });
-  }
-  store.saveMental(
-    {
-      id: "prior-model",
-      projectId: "test",
-      revision: 1,
-      baseRevision: 0,
-      content: { ...emptyMental(), goals: [{ text: "Stable claim", sources: ["earlier"] }] },
-      author: "model",
-      status: "active",
-      candidateId: "earlier",
-      generation: meta,
-      createdAt: now,
-    },
-    0,
-  );
-  store.saveJob({ ...job, extractionComplete: true });
-  worker.ollama.proposeMental = async () => ({
-    content: { ...emptyMental(), constraints: [{ text: "Stable claim", sources: ["later"] }] },
-    meta,
-  });
-  await worker.tick();
-  expect(store.activeMental("test")?.content.goals[0]?.sources).toEqual(["earlier"]);
-  expect(store.mentalCards("test").find((card) => card.candidateId === "later")?.status).toBe(
-    "proposal",
-  );
 });
 
 test("invalid provider output and exhausted transport retries never produce a write plan", async () => {

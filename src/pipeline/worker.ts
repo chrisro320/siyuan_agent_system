@@ -2,13 +2,10 @@ import {
   AppError,
   type Candidate,
   type ErrorInfo,
-  emptyMental,
   type Job,
-  type MentalCard,
   type Operation,
   PROMPT_VERSION,
   validateEvidence,
-  validateMentalSources,
 } from "../contracts";
 import { JevClient } from "../providers/jev";
 import { OllamaClient } from "../providers/ollama";
@@ -139,8 +136,6 @@ export class Worker {
         this.store.audit("source-excluded", source.id, "來源符合排除規則，未送往雲端。");
         return;
       }
-      const prior = this.store.activeMental(conversation.projectId);
-      const mental = prior?.content ?? emptyMental();
       if (!job.extractionComplete) {
         const segments = segmentConversation(conversation);
         const plan = digest(
@@ -167,7 +162,7 @@ export class Worker {
           this.assertPolicy(job);
           const segment = segments[index];
           if (!segment) throw new AppError("missing_segment", "來源分段不存在。");
-          const result = await this.ollama.extract(segment, mental);
+          const result = await this.ollama.extract(segment);
           this.assertPolicy(job);
           const batch: Candidate[] = [];
           for (const draft of result.candidates) {
@@ -246,7 +241,6 @@ export class Worker {
           const judgment = await this.jev.judge(
             candidate.draft,
             conversation.messages,
-            mental,
             related,
             settings.policy,
             job.policyRevision,
@@ -333,15 +327,6 @@ export class Worker {
             this.store.audit("published", candidate.id, `siyuan://blocks/${verified.blockId}`);
           }
         }
-        if (
-          ["published", "duplicate"].includes(candidate.status) &&
-          !this.store
-            .mentalCards(candidate.projectId)
-            .some((card) => card.candidateId === candidate.id)
-        ) {
-          stage = "mental";
-          await this.updateMental(candidate);
-        }
       }
       const candidates = this.store.candidates(job.id);
       this.updateJob(
@@ -380,41 +365,6 @@ export class Worker {
     candidate.version += 1;
     candidate.updatedAt = new Date().toISOString();
     this.store.saveCandidate(candidate);
-  }
-
-  private async updateMental(candidate: Candidate): Promise<void> {
-    const prior = this.store.activeMental(candidate.projectId);
-    const content = prior?.content ?? emptyMental();
-    const proposal = await this.ollama.proposeMental(content, [candidate]);
-    const current = this.store.activeMental(candidate.projectId);
-    validateMentalSources(proposal.content, candidate.projectId, this.store.candidates());
-    const claimKeys = new Set(
-      Object.entries(proposal.content).flatMap(([section, claims]) =>
-        claims.map((claim) => JSON.stringify([section, claim.text, [...claim.sources].sort()])),
-      ),
-    );
-    const changedPriorClaim = Object.entries(content).some(([section, claims]) =>
-      claims.some(
-        (claim) => !claimKeys.has(JSON.stringify([section, claim.text, [...claim.sources].sort()])),
-      ),
-    );
-    const manualOrConflict =
-      prior?.author === "human" ||
-      changedPriorClaim ||
-      (current?.revision ?? 0) !== (prior?.revision ?? 0);
-    const card: MentalCard = {
-      id: digest(`mental:${candidate.id}`),
-      projectId: candidate.projectId,
-      revision: (prior?.revision ?? 0) + 1,
-      baseRevision: prior?.revision ?? 0,
-      content: proposal.content,
-      author: "model",
-      status: manualOrConflict ? "proposal" : "active",
-      candidateId: candidate.id,
-      generation: proposal.meta,
-      createdAt: new Date().toISOString(),
-    };
-    this.store.saveMental(card, card.status === "active" ? card.baseRevision : undefined);
   }
 
   private async scanSources(): Promise<void> {

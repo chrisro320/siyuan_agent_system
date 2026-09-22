@@ -43,6 +43,9 @@ export const RELATED_LIMIT = 5;
 /** SQL 先掃描的上限，再由記憶體排序取前幾名。 */
 const RELATED_SCAN_LIMIT = 25;
 
+/** 單一查詢詞的全文檢索筆數上限。 */
+export const SEARCH_PAGE_LIMIT = 20;
+
 /** 單則相關筆記的內容上限：模型只需要足以判斷「同一主題」的篇幅。 */
 const RELATED_CONTENT_MAX = 8_000;
 
@@ -64,6 +67,12 @@ const attributeMapSchema = z.record(z.string(), z.string());
 const attributeMapMapSchema = z.record(z.string(), z.record(z.string(), z.string()));
 const notebookListSchema = z.object({ notebooks: z.array(z.unknown()) });
 
+/**
+ * 全文檢索回應。只取區塊清單：內容一律另外以 Kramdown 讀回，
+ * 因此檢索回應中的高亮內容不會被當成筆記正文使用。
+ */
+const searchResultSchema = z.object({ blocks: z.array(z.record(z.string(), z.unknown())) });
+
 export interface SiyuanClientOptions {
   /** 只使用使用者自行設定的位址；空字串代表「尚未設定」，網路操作才失敗。 */
   url: string;
@@ -79,6 +88,16 @@ export interface BlockReadback {
   hpath: string;
   kramdown: string;
   attributes: Record<string, string>;
+}
+
+/**
+ * 全文檢索的單一命中。`id` 是命中區塊（文件層命中時就是文件本身），`rootId` 是所屬文件；
+ * 兩者都只是「可能相關」的線索，呼叫端仍必須以 {@link SiyuanClient.readBlocks} 讀回現況再判斷。
+ */
+export interface SearchHit {
+  id: string;
+  rootId: string;
+  notebookId: string;
 }
 
 /**
@@ -277,8 +296,91 @@ export class SiyuanClient {
     };
   }
 
+  /**
+   * 以思源的全文檢索找可能相關的區塊，範圍限定單一筆記本。
+   *
+   * `query` 由呼叫端準備成一個有意義的查詢詞（不是整句原文）；`paths` 只放筆記本
+   * 識別碼，因為思源會把人寫的 `rootPath` 當成內部節點路徑解析，兩者不可混用。
+   * 命中的內容一律不回傳：呼叫端必須自行讀回現況，才不會把檢索索引或高亮字串
+   * 當成筆記正文。
+   */
+  async searchBlocks(
+    notebookId: string,
+    query: string,
+    pageSize = SEARCH_PAGE_LIMIT,
+  ): Promise<SearchHit[]> {
+    const data = await this.post("/api/search/fullTextSearchBlock", {
+      query,
+      method: 0,
+      paths: [notebookId],
+      page: 1,
+      pageSize,
+      groupBy: 0,
+      orderBy: 0,
+    });
+    const parsed = searchResultSchema.safeParse(data);
+    if (!parsed.success) {
+      throw new AppError(
+        "siyuan_invalid_response",
+        "思源的全文檢索結果不是可解析的區塊清單。",
+        false,
+        502,
+      );
+    }
+    const hits: SearchHit[] = [];
+    for (const row of parsed.data.blocks) {
+      const id = field(row, "id");
+      if (!isNodeId(id)) continue;
+      hits.push({ id, rootId: field(row, "rootID"), notebookId: field(row, "box") });
+    }
+    return hits;
+  }
+
+  /**
+   * 批次讀回區塊的位置、Kramdown 與屬性，全部是唯讀查詢。
+   *
+   * 只回傳 SQL 索引確實看得到的區塊，順序與輸入一致且去重。索引看不到的區塊會被
+   * 略過而不是回報空殼；呼叫端因此只會得到「可確認的現況」，不會把未知當成存在。
+   */
+  async readBlocks(ids: readonly string[]): Promise<BlockReadback[]> {
+    const unique = [...new Set(ids.filter(isNodeId))];
+    if (unique.length === 0) return [];
+    await this.flushTransaction();
+    const rows = await this.sqlRows(
+      `SELECT id, root_id, box, hpath FROM blocks WHERE id IN (${unique.map(sqlLiteral).join(", ")})`,
+    );
+    const locations: Record<string, { rootId: string; notebookId: string; hpath: string }> = {};
+    for (const row of rows) {
+      locations[field(row, "id")] = {
+        rootId: field(row, "root_id"),
+        notebookId: field(row, "box"),
+        hpath: field(row, "hpath"),
+      };
+    }
+    const present = unique.filter((id) => locations[id] !== undefined);
+    if (present.length === 0) return [];
+    const [attributes, kramdowns] = await Promise.all([
+      this.batchAttributes(present),
+      this.batchKramdowns(present),
+    ]);
+    const blocks: BlockReadback[] = [];
+    for (const id of present) {
+      const location = locations[id];
+      if (!location) continue;
+      blocks.push({
+        id,
+        rootId: location.rootId,
+        notebookId: location.notebookId,
+        hpath: location.hpath,
+        kramdown: kramdowns[id] ?? "",
+        attributes: attributes[id] ?? {},
+      });
+    }
+    return blocks;
+  }
+
   /** 用思源自身的解析器比較 Markdown 語義；不渲染、不執行回傳的 HTML。 */
-  async renderMarkdown(markdown: string): Promise<string> {
+  async renderMarkdown(markdown: string, textMarks = false): Promise<string> {
     const parsed = z
       .object({ html: z.string().min(1) })
       .safeParse(await this.post("/api/lute/md2html", { markdown }));
@@ -296,10 +398,27 @@ export class SiyuanClient {
           if (NODE_ID_PATTERN.test(element.getAttribute("id") ?? "")) element.removeAttribute("id");
           if (/^\d{14}$/.test(element.getAttribute("updated") ?? ""))
             element.removeAttribute("updated");
+          if (textMarks && element.tagName === "span") {
+            const type = element.getAttribute("data-type");
+            // 原生 textmark 表示保留原文空白；只轉換語義相同的單一強調標記，
+            // 未知組合與其他屬性保持原樣，不能用格式正規化掩蓋內容變更。
+            const tag =
+              type === "strong" ? "strong" : type === "em" ? "em" : type === "s" ? "del" : null;
+            if (tag !== null) {
+              element.tagName = tag;
+              element.removeAttribute("data-type");
+            }
+          }
         },
       })
       .transform(new Response(parsed.data.html))
       .text();
+  }
+
+  /** 首次核對的後備來源：避開標準 Markdown 匯出器在強調標記旁補入的空白。 */
+  async getTextMarkKramdown(id: string): Promise<string> {
+    if (!isNodeId(id)) throw new AppError("invalid_block_id", "區塊識別碼不正確。");
+    return this.kramdownOf(id, "textmark");
   }
 
   /** 讓思源把待寫的索引寫完；在依賴 SQL 之前當成屏障使用。 */
@@ -382,10 +501,10 @@ export class SiyuanClient {
     return data;
   }
 
-  private async kramdownOf(id: string): Promise<string> {
-    const data = await this.post("/api/block/getBlockKramdown", { id });
+  private async kramdownOf(id: string, mode: "md" | "textmark" = "md"): Promise<string> {
+    const data = await this.post("/api/block/getBlockKramdown", { id, mode });
     const parsed = kramdownDataSchema.safeParse(data);
-    if (!parsed.success) {
+    if (!parsed.success || parsed.data.id !== id) {
       throw new AppError(
         "siyuan_invalid_response",
         "思源沒有回傳可用的區塊內容，無法核對寫入結果。",

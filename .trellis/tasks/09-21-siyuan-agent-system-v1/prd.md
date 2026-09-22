@@ -2,14 +2,15 @@
 
 ## Goal
 
-Build a source-independent, single-user knowledge distillation service. The user
-continues using different AI conversation tools; this service extracts reusable
-knowledge, asks Jev whether it deserves retention, and publishes readable,
-traceable notes to SiYuan. SiYuan is the only knowledge-base destination.
+Build a source-independent, single-user knowledge publishing service for human
+readers. Approved new dialogue is captured in the background, reusable knowledge
+passes Jev's publication gate into SiYuan, and the user can read and correct it.
+Hindsight remains the primary automatic LLM memory system. SiYuan is searched only
+on demand, never through automatic recall or context injection.
 
 ## Background
 
-- The repository currently contains project/Trellis initialization only.
+- The initial repository contained project/Trellis initialization only.
 - The repository is `chrisro320/siyuan_agent_system`, private, on `master`.
 - The user authorized creation of this Trellis task on 2026-09-21.
 - The initial OMP-specific idea was generalized by the user: only the SiYuan
@@ -112,6 +113,8 @@ conflict instead of restoring an old whole-document snapshot.
 Provide source setup/import, job status, candidate previews with source evidence,
 review/correction/reprocessing, mental-context cards, destination/rule settings,
 publication links, and operation history. Use Traditional Chinese UI text.
+The panel is for inspection, correction, and failures; opening it, importing files,
+or manually requesting recall must not be required during normal enabled chatting.
 
 Provider keys are server-side environment/secret-file inputs. The panel may show
 whether a provider is configured, never its secret value.
@@ -187,12 +190,155 @@ unrestricted mutation of the existing knowledge base.
   `~/.omp/agent/lib/jev.ts:143-172`, lossy state handling at `:396-427`.
 - SiYuan v3.8.4 source does not make a human-readable document path an idempotency
   key: https://github.com/siyuan-note/siyuan/blob/v3.8.4/kernel/model/path.go#L75-L113
-- SiYuan metadata reads succeeded earlier; no production write or rollback has
-  been tested. Real provider quality, latency, cost, and account authorization
-  have not yet been measured for this release.
+- First-release cloud authorization and isolated SiYuan write/recovery evidence
+  are recorded in `implement.md`. Production write/rollback, provider-quality
+  benchmarking, and the new hands-free path are not covered by that evidence.
 
-## Planning approval
+## Approval history
 
-This document proposes the complete first-release boundary for review. Creation
-of the task does not authorize implementation. The latest planning summary must
-receive a subsequent explicit user approval before `task.py start`.
+The first-release implementation was approved and recorded in `implement.md`;
+commit `b33c43f` contains that release. The hands-free integration below is a new
+planning increment. Its implementation and live-data activation require approval
+of the latest concrete scope; earlier synthetic-data approval is not permission
+to upload real session history or write production notebooks.
+
+## Hands-free integration — 2026-09-21
+
+
+### R10 — Automatic capture
+
+Provide an OMP adapter without patching OMP core. Capture completed root-session
+dialogue for explicitly enabled projects only. Activation must not silently
+backfill historical sessions. Preserve canonical session/message identity and
+source evidence; exclude system instructions, thinking, subagent transcripts,
+known credential patterns, and previously injected recall content.
+
+Reuse the existing durable ingestion, generation, Jev, publication, and mental
+context pipeline. Delivery failures remain retryable without blocking ordinary
+chat or losing already captured data. A restart or resend must not create a
+second publication. Keep the ingestion contract source-independent.
+
+### R11 — Automatic recall
+
+Before a normal user turn, retrieve authorized project context and relevant
+confirmed SiYuan knowledge automatically. Include traceable source references.
+Candidates awaiting review, archive-only items, withdrawn writes, and inaccessible
+material are not eligible as confirmed memory. Respect manual changes in SiYuan
+rather than returning a stale generated copy.
+
+Supply memory as bounded, untrusted contextual data, not a system instruction or
+new tool authority. Do not rewrite previously sent history or dynamically alter
+the toolset. Timeouts must not prevent the chat from proceeding; degraded status
+must remain inspectable. Recalled content must not be captured as new evidence.
+
+### Acceptance additions
+
+- AC12 (R10): In a real sandboxed OMP session, finish a synthetic conversation
+  without using the panel or a retain command; observe durable ingestion and
+  the real approved-provider pipeline reaching an isolated SiYuan note.
+- AC13 (R11): Start another sandboxed conversation in the same project and ask
+  a relevant ordinary question. Confirm the outgoing model context includes the
+  note and provenance without any explicit recall request; an unrelated project
+  receives none of that project's memory.
+- AC14 (R10): Activation ignores pre-existing history; subagent sessions, system
+  records, thinking, and recalled context do not enter the retained evidence.
+- AC15 (R10/R7): Repeat capture delivery and reopen the local state three times;
+  observe no duplicated note and eventual delivery of pending accepted captures.
+- AC16 (R11): A service outage does not block normal chat or inject stale output.
+  Pending capture remains recoverable, and degraded state is visible.
+- AC17 (R11): Human edits, withdrawn notes, and unconfirmed candidates are handled
+  according to R11. Returned references resolve inside the approved destination.
+- AC18 (R10/R11): Tool follow-ups, retries, and resumed turns preserve prior
+  message prefixes; memory injection does not feed itself back into capture.
+- AC19 (R10/R11): The approved project has only one automatic memory owner.
+  Unrelated projects retain their existing memory configuration and behavior.
+
+### Scope and activation decision
+
+Implement the generic service boundary and OMP adapter first; additional client
+adapters, logged-in website scraping, and full Hindsight API emulation remain out
+of scope. Existing R1–R9 safety, cloud models, and SiYuan write boundaries still
+apply. Do not replace global Hindsight state or migrate its history implicitly.
+
+Recommended initial activation: only new root conversations under
+`/mnt/data/Projects/siyuan`, mapped to project `siyuan-agent-system` and managed
+root `/HandsFree` in the existing isolated `Agent Validation` notebook. Other
+projects, historical sessions, and production notes remain untouched. This scope
+requires user approval before implementation and activation.
+
+Approval: after reviewing the concrete plan, the user selected
+`實作並啟用本專案`. This authorizes implementation and, after synthetic acceptance,
+the exact new-session-only project activation above. It does not authorize
+historical backfill, production notes, other projects, or a git push.
+
+## Human-first correction — 2026-09-22 (current scope)
+
+The user clarified that SiYuan is primarily for people, not a second Hindsight,
+and then authorized continuing the correction. This section supersedes the
+automatic-recall and parallel mental-model requirements above; earlier sections
+and acceptance records describe the already delivered isolated implementation.
+
+- R5 is retired from the active product: no parallel SiYuan mental-model
+  generation, maintenance, injection, or editable mental-card surface. Preserve
+  stored historical data without continuing that subsystem.
+- R10 remains: authorized new root dialogue is published in the background
+  through extraction, Jev and the existing durable writer. Hindsight being
+  enabled is not a reason to reject publication.
+- R11 becomes explicit knowledge search: provide a bounded, read-only interface
+  and OMP tool for requests such as "find that note in SiYuan". Ordinary turns,
+  automatic continuations, retries and session startup do not perform a SiYuan
+  search or inject its content.
+- AC6 is replaced by proof that publishing does not generate mental cards.
+  AC11 applies to extraction/readable knowledge generation only; Jev retains
+  publication authority. Retired mental data is not deleted or republished.
+- AC13/AC16/AC18 now require zero automatic search/context mutation, explicit
+  search with current content and provenance, and nonblocking capture recovery.
+  AC14/AC15/AC17 source, durability and authorization boundaries remain.
+- AC19 now requires Hindsight to retain its original automatic-memory role.
+  Restore only this rollout's project-level disabling overrides; preserve global
+  configuration, existing Hindsight data and unrelated project/task settings.
+- The panel remains a human-facing publication/review/settings/history surface.
+  This is still cloud processing, not an offline claim.
+- Formal SiYuan connection must use a confirmed notebook/root, a clean service
+  data boundary and no synthetic-memory migration. The discovered production
+  Agent-System notebook is `20260820010437-15chezf`; selecting its managed root
+  and authorizing the concrete write remain deployment gates.
+- No historical backfill, new project scope, arbitrary handwritten-note edits,
+  Hindsight uninstall/data migration, commit, push or archive is authorized.
+
+Acceptance: actual ordinary OMP turns publish without automatic search; an
+explicit search tool call returns an authorized current note and source link;
+Hindsight coexists without ownership errors; no mental-generation request is
+made; the real panel has no mental-model editing workflow. Retain capture replay,
+write reconciliation, human-edit protection, project isolation and credential
+boundaries. Verify existing persisted state upgrades without backfill or replay.
+
+### Formal destination and retirement authorization
+
+At the concrete deployment confirmation, the user selected a **new** production
+notebook named `探索未至之境`, not the existing Agent-System notebook. The first
+publication records the confirmed Hindsight/SiYuan responsibility split. This
+supersedes the candidate Agent-System destination above. The project remains
+`siyuan-agent-system`; no other project or history is enrolled.
+
+The user also explicitly selected removal of the **entire isolated test
+environment** after formal acceptance: the 16806 test SiYuan workspace including
+Agent Validation, and its test service/data. Preserve verification evidence;
+do not delete production notes, Hindsight or unrelated containers/data.
+
+### Publication layout and maintenance handoff authorization
+
+The user approved removing the content-kind directory: keep managed root,
+project, topic and article; retain classification as metadata. The existing
+production note was moved by stable ID and only its empty `decision` parent
+was removed.
+
+After verification, the user authorized a formal pause, a workspace checkpoint,
+push to the existing `chrisro320/siyuan_agent_system` remote, and changing that
+repository from private to public. This supersedes the earlier no-commit/no-push
+restriction for this checkpoint only. Keep credentials, raw runtime evidence,
+local activation and databases out of Git; inspect history before publication.
+The task is not archived and the separate guideline-bootstrap task is unchanged.
+Other LLMs will maintain and extend the verified baseline; no future feature
+scope is implied. The user additionally authorized publishing reusable lessons
+from this long task into the confirmed SiYuan destination.

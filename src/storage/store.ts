@@ -20,8 +20,6 @@ import {
   isoTime,
   type Job,
   jobSchema,
-  type MentalCard,
-  mentalCardSchema,
   type Operation,
   operationSchema,
   PROMPT_VERSION,
@@ -40,11 +38,13 @@ import {
   sourceKeyOf,
 } from "./identity.ts";
 
-const SCHEMA_VERSION = 1;
+const SCHEMA_VERSION = 3;
 
 /**
- * 第一版結構。每一條 unique 都對應一種不可混淆的身分：
- * 來源版本、工作執行、發布操作、心智卡生效版本。
+ * 第一版結構。每一條 unique 都對應一種不可混淆的身分：來源版本、工作執行與發布操作。
+ *
+ * `mental_cards` 是已退役的自動脈絡卡資料表：本版不再有任何讀取或寫入路徑，
+ * 保留定義只是為了讓既有的資料庫與新安裝有一致的結構，既有列不會被刪除或改寫。
  */
 const SCHEMA_V1 = `
 CREATE TABLE settings (
@@ -146,6 +146,7 @@ CREATE TABLE operations (
   updatedAt TEXT NOT NULL
 );
 CREATE INDEX operations_project ON operations(projectId, createdAt);
+-- 已退役的自動脈絡卡資料表：僅保留既有列，本版沒有任何讀寫路徑。
 CREATE TABLE mental_cards (
   id TEXT PRIMARY KEY,
   projectId TEXT NOT NULL,
@@ -174,6 +175,66 @@ CREATE TABLE source_health (
   error TEXT
 );
 `;
+
+/**
+ * 第二版結構：自動擷取的受理回條。
+ *
+ * `captureId` 由轉接器提供且不可重複使用；同一識別碼只代表一次受理。內容摘要
+ * 用來分辨「重送同一份內容」與「拿同一識別碼送不同內容」，後者是衝突而不是更新。
+ * 這張表只是受理紀錄：來源身分、版本與發布保護仍由既有的 imports/jobs/operations 決定。
+ */
+const SCHEMA_V2 = `
+CREATE TABLE capture_receipts (
+  captureId TEXT PRIMARY KEY,
+  payloadDigest TEXT NOT NULL,
+  branchLeafId TEXT,
+  importId TEXT NOT NULL,
+  jobId TEXT NOT NULL,
+  projectId TEXT NOT NULL,
+  sourceKey TEXT NOT NULL,
+  revision TEXT NOT NULL,
+  createdAt TEXT NOT NULL
+);
+CREATE INDEX capture_receipts_import ON capture_receipts(importId);
+`;
+
+/**
+ * 第三版結構：發布查詢用的索引。
+ *
+ * 顯式搜尋以「全文檢索命中的區塊／文件識別碼」查詢已驗證的發布操作，這些索引讓查詢
+ * 都是有界的索引查找，而不是掃描全庫的操作。`operations_candidate` 與
+ * `candidates_status` 來自已退役的自動脈絡卡查詢，既有的資料庫已經建立；這裡保留
+ * 定義讓新舊資料庫的索引集合一致，但目前的執行路徑不再使用它們。
+ * 只新增索引，不動任何既有資料。
+ */
+const SCHEMA_V3 = `
+CREATE INDEX operations_block ON operations(blockId);
+CREATE INDEX operations_document ON operations(documentId);
+CREATE INDEX operations_candidate ON operations(candidateId);
+CREATE INDEX candidates_status ON candidates(projectId, status);
+`;
+
+/**
+ * 依序套用的結構遷移。索引 0 對應 `user_version` 1。
+ *
+ * 新安裝會依序跑完所有版本；既有資料庫只補跑缺少的版本，不會重建或改寫既有資料表。
+ */
+const MIGRATIONS: readonly ((db: Database) => void)[] = [
+  (db) => {
+    db.run(SCHEMA_V1);
+    db.query("INSERT INTO settings (revision, data, createdAt) VALUES (?, ?, ?)").run(
+      0,
+      JSON.stringify(defaultSettings()),
+      now(),
+    );
+  },
+  (db) => {
+    db.run(SCHEMA_V2);
+  },
+  (db) => {
+    db.run(SCHEMA_V3);
+  },
+];
 
 interface SettingsRow {
   revision: number;
@@ -243,6 +304,24 @@ export type CandidateRevision = z.infer<typeof candidateRevisionSchema>;
 const messageRevisionRowSchema = z.object({ messageKey: id, revision: id });
 export type MessageRevisionRow = z.infer<typeof messageRevisionRowSchema>;
 
+/**
+ * 自動擷取回條。`payloadDigest` 是受理當下的請求內容摘要：
+ * 同一 `captureId` 重送相同內容是重播，換成不同內容則是衝突。
+ */
+const captureReceiptSchema = z.object({
+  captureId: id,
+  payloadDigest: id,
+  /** 轉接器回報的分支末端訊息；只是受理紀錄的一部分，不參與匯入身分。 */
+  branchLeafId: id.nullable(),
+  importId: id,
+  jobId: id,
+  projectId: id,
+  sourceKey: id,
+  revision: id,
+  createdAt: isoTime,
+});
+export type CaptureReceipt = z.infer<typeof captureReceiptSchema>;
+
 interface JobRow {
   id: string;
   importId: string;
@@ -264,13 +343,6 @@ interface DocumentRow {
   data: string;
 }
 
-interface MentalRow {
-  id: string;
-  projectId: string;
-  revision: number;
-  data: string;
-}
-
 interface AuditRow {
   id: string;
   action: string;
@@ -286,9 +358,77 @@ interface HealthRow {
   error: string | null;
 }
 
+interface CaptureRow {
+  captureId: string;
+  payloadDigest: string;
+  branchLeafId: string | null;
+  importId: string;
+  jobId: string;
+  projectId: string;
+  sourceKey: string;
+  revision: string;
+  createdAt: string;
+}
+
 interface ImportKeyRow {
   id: string;
   revision: string;
+}
+
+/**
+ * 一次匯入的來源身分。內容摘要只取請求的原始位元組，來源鍵與版本取自正規化後的對話；
+ * 三者在交易外算好，因此交易內只做比對與寫入，不做任何非同步工作。
+ */
+interface SourceIdentity {
+  sourceKey: string;
+  revision: string;
+  rawDigest: string;
+  sourceLocator: string | null;
+}
+
+function sourceIdentity(request: ImportRequest, conversation: Conversation): SourceIdentity {
+  return {
+    sourceKey: sourceKeyOf(
+      conversation.source,
+      conversation.sourceSessionId,
+      conversation.projectId,
+    ),
+    revision: revisionOf(conversation),
+    rawDigest: digest(request.content),
+    sourceLocator: request.sourceLocator ?? conversation.sourceLocator,
+  };
+}
+
+/**
+ * 自動擷取的受理結果。
+ *
+ * - `created`：這次是首次受理，`import`／`job` 與回條在同一交易內建立。
+ * - `replay`：同一個 `captureId` 送來相同內容，回覆既有回條，沒有建立任何新紀錄。
+ * - `conflict`：同一個 `captureId` 送來不同內容，不覆寫也不建立匯入或工作。
+ */
+export type CaptureIngestResult =
+  | {
+      status: "created";
+      receipt: CaptureReceipt;
+      import: ImportRecord;
+      job: Job;
+      duplicate: boolean;
+    }
+  | { status: "replay"; receipt: CaptureReceipt }
+  | { status: "conflict"; receipt: CaptureReceipt };
+
+/**
+ * 一次發布的現況：候選與操作一起讀出。搜尋端以這個組合判斷資格，
+ * 不會只看候選狀態或只看子區塊就決定是否回傳。
+ */
+export interface PublicationSnapshot {
+  candidate: Candidate;
+  operation: Operation;
+}
+
+interface PublicationRow {
+  candidate: string;
+  operation: string;
 }
 
 function notFound(kind: string, id: string): never {
@@ -407,11 +547,17 @@ export class Store {
     }
     if (version < SCHEMA_VERSION) {
       this.tx(() => {
-        this.db.run(SCHEMA_V1);
+        for (let index = version; index < MIGRATIONS.length; index += 1) {
+          const apply = MIGRATIONS[index];
+          if (!apply) {
+            throw new AppError(
+              "storage_migration_missing",
+              "資料庫結構遷移不完整，已停止啟動以免留下半套結構。",
+            );
+          }
+          apply(this.db);
+        }
         this.db.run(`PRAGMA user_version = ${SCHEMA_VERSION}`);
-        this.db
-          .query("INSERT INTO settings (revision, data, createdAt) VALUES (?, ?, ?)")
-          .run(0, JSON.stringify(defaultSettings()), now());
       });
       this.protectSidecarFiles();
     }
@@ -661,46 +807,50 @@ export class Store {
   ): Promise<{ import: ImportRecord; job: Job; duplicate: boolean }> {
     const parsedRequest = importRequestSchema.parse(request);
     const parsedConversation = conversationSchema.parse(conversation);
-    const sourceKey = sourceKeyOf(
-      parsedConversation.source,
-      parsedConversation.sourceSessionId,
-      parsedConversation.projectId,
-    );
-    const revision = revisionOf(parsedConversation);
-    const rawDigest = digest(parsedRequest.content);
-    const sourceLocator = parsedRequest.sourceLocator ?? parsedConversation.sourceLocator;
+    const identity = sourceIdentity(parsedRequest, parsedConversation);
 
-    await this.persistRaw(rawDigest, parsedRequest.content);
+    await this.persistRaw(identity.rawDigest, parsedRequest.content);
 
-    return this.tx(() => {
-      const existing = this.importRowByRevision(sourceKey, revision);
-      if (existing) {
-        const record = this.importFromRow(existing);
-        this.recordRawSnapshot(record.id, rawDigest, sourceLocator);
-        return {
-          import: record,
-          job: this.createJobInTx(record.id, false),
-          duplicate: true,
-        };
-      }
-      const record: ImportRecord = importRecordSchema.parse({
-        id: newId(),
-        sourceKey,
-        revision,
-        rawDigest,
-        conversation: parsedConversation,
-        createdAt: now(),
-      });
-      this.insertImport(record, parsedConversation);
-      this.writeMessageRevisions(record, parsedConversation);
-      this.recordRawSnapshot(record.id, rawDigest, sourceLocator);
-      this.insertAudit(
-        "import.ingested",
-        record.id,
-        `來源 ${parsedConversation.source} 專案 ${parsedConversation.projectId} 共 ${parsedConversation.messages.length} 則訊息。`,
-      );
-      return { import: record, job: this.createJobInTx(record.id, false), duplicate: false };
+    return this.tx(() => this.ingestInTx(parsedConversation, identity));
+  }
+
+  /**
+   * 交易內的匯入：比對來源版本，寫入匯入、訊息版本與工作。
+   *
+   * 交易內不得有非同步工作，因此原始位元組由呼叫端在交易外先行耐久落盤；
+   * 這也讓上層的擷取受理可以在同一個交易裡再寫入回條。
+   */
+  private ingestInTx(
+    parsedConversation: Conversation,
+    identity: SourceIdentity,
+  ): { import: ImportRecord; job: Job; duplicate: boolean } {
+    const existing = this.importRowByRevision(identity.sourceKey, identity.revision);
+    if (existing) {
+      const record = this.importFromRow(existing);
+      this.recordRawSnapshot(record.id, identity.rawDigest, identity.sourceLocator);
+      return {
+        import: record,
+        job: this.createJobInTx(record.id, false),
+        duplicate: true,
+      };
+    }
+    const record: ImportRecord = importRecordSchema.parse({
+      id: newId(),
+      sourceKey: identity.sourceKey,
+      revision: identity.revision,
+      rawDigest: identity.rawDigest,
+      conversation: parsedConversation,
+      createdAt: now(),
     });
+    this.insertImport(record, parsedConversation);
+    this.writeMessageRevisions(record, parsedConversation);
+    this.recordRawSnapshot(record.id, identity.rawDigest, identity.sourceLocator);
+    this.insertAudit(
+      "import.ingested",
+      record.id,
+      `來源 ${parsedConversation.source} 專案 ${parsedConversation.projectId} 共 ${parsedConversation.messages.length} 則訊息。`,
+    );
+    return { import: record, job: this.createJobInTx(record.id, false), duplicate: false };
   }
 
   getImport(importId: string): ImportRecord {
@@ -711,6 +861,106 @@ export class Store {
       .get(importId);
     if (!row) notFound("匯入紀錄", importId);
     return this.importFromRow(row);
+  }
+
+  // ------------------------------------------------------------ 擷取回條
+
+  private captureReceiptRow(captureId: string): CaptureRow | null {
+    return (
+      this.db
+        .query<CaptureRow, [string]>(
+          "SELECT captureId, payloadDigest, branchLeafId, importId, jobId, projectId, sourceKey, revision, createdAt FROM capture_receipts WHERE captureId = ?",
+        )
+        .get(captureId) ?? null
+    );
+  }
+
+  /**
+   * 讀取自動擷取的受理回條。`null` 只代表這個 `captureId` 尚未受理過。
+   */
+  captureReceipt(captureId: string): CaptureReceipt | null {
+    const row = this.captureReceiptRow(captureId);
+    return row ? captureReceiptSchema.parse(row) : null;
+  }
+
+  /**
+   * 受理一次自動擷取：回條、匯入與工作在同一個交易內建立。
+   *
+   * 邊界與不變條件：
+   *
+   * - 原始位元組先在交易外耐久落盤。崩潰最多留下一份沒有被任何回條引用的原始快照，
+   *   不可能留下沒有回條約束、卻已經可以被抽取與發布的工作。
+   * - `captureId` 的比對與匯入、工作的建立同屬一個交易：同一個識別碼的併發送達由
+   *   `BEGIN IMMEDIATE` 序列化，落後的那一次只會看到既有回條，不會另外建立匯入或工作。
+   * - 同一個識別碼帶著不同內容時不覆寫、也不建立任何新紀錄，由呼叫端回報衝突。
+   */
+  async ingestCapture(input: {
+    captureId: string;
+    payloadDigest: string;
+    branchLeafId: string | null;
+    request: ImportRequest;
+    conversation: Conversation;
+  }): Promise<CaptureIngestResult> {
+    const captureId = id.parse(input.captureId);
+    const payloadDigest = id.parse(input.payloadDigest);
+    const branchLeafId = input.branchLeafId === null ? null : id.parse(input.branchLeafId);
+    const parsedRequest = importRequestSchema.parse(input.request);
+    const parsedConversation = conversationSchema.parse(input.conversation);
+    const identity = sourceIdentity(parsedRequest, parsedConversation);
+
+    await this.persistRaw(identity.rawDigest, parsedRequest.content);
+
+    return this.tx((): CaptureIngestResult => {
+      const existing = this.captureReceiptRow(captureId);
+      if (existing) {
+        const receipt = captureReceiptSchema.parse(existing);
+        return receipt.payloadDigest === payloadDigest
+          ? { status: "replay", receipt }
+          : { status: "conflict", receipt };
+      }
+      const result = this.ingestInTx(parsedConversation, identity);
+      const receipt = captureReceiptSchema.parse({
+        captureId,
+        payloadDigest,
+        branchLeafId,
+        importId: result.import.id,
+        jobId: result.job.id,
+        projectId: parsedConversation.projectId,
+        sourceKey: result.import.sourceKey,
+        revision: result.import.revision,
+        createdAt: now(),
+      });
+      this.insertCaptureReceipt(receipt);
+      return {
+        status: "created",
+        receipt,
+        import: result.import,
+        job: result.job,
+        duplicate: result.duplicate,
+      };
+    });
+  }
+
+  private insertCaptureReceipt(receipt: CaptureReceipt): void {
+    try {
+      this.db
+        .query(
+          "INSERT INTO capture_receipts (captureId, payloadDigest, branchLeafId, importId, jobId, projectId, sourceKey, revision, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        )
+        .run(
+          receipt.captureId,
+          receipt.payloadDigest,
+          receipt.branchLeafId,
+          receipt.importId,
+          receipt.jobId,
+          receipt.projectId,
+          receipt.sourceKey,
+          receipt.revision,
+          receipt.createdAt,
+        );
+    } catch (error) {
+      this.rethrowConflict(error, "擷取回條");
+    }
   }
 
   // ------------------------------------------------------------------ 工作
@@ -1076,6 +1326,71 @@ export class Store {
   }
 
   /**
+   * 讀取發布快照。候選與操作在同一筆查詢取出，識別碼清單以 JSON 陣列傳入，
+   * 因此查詢只有固定幾個參數，且只走既有的索引，不隨歷史成長。
+   */
+  private publicationRows(sql: string, params: (string | number)[]): PublicationSnapshot[] {
+    return this.db
+      .query<PublicationRow, (string | number)[]>(sql)
+      .all(...params)
+      .map((row) => ({
+        operation: operationSchema.parse(JSON.parse(row.operation)),
+        candidate: candidateSchema.parse(JSON.parse(row.candidate)),
+      }));
+  }
+
+  /**
+   * 檢索命中對應的已驗證發布：以命中的區塊與文件識別碼為界，並在 SQL 端同時篩選
+   * 專案、筆記本、操作狀態與候選狀態。
+   *
+   * - 命中的文件根不會放大成掃描全庫操作：查詢只走 `operations(blockId)` 與
+   *   `operations(documentId)` 索引，識別碼清單本身也有界（查詢詞數 × 每頁命中數）。
+   * - 超過 `limit` 時只取最新的幾筆；較舊的命中不另行補查，也不會為了它們擴大請求。
+   */
+  publicationsForBlocks(
+    projectId: string,
+    notebookId: string,
+    blockIds: readonly string[],
+    limit: number,
+  ): PublicationSnapshot[] {
+    const ids = [...new Set(blockIds)];
+    if (ids.length === 0) return [];
+    const list = JSON.stringify(ids);
+    return this.publicationRows(
+      [
+        "SELECT o.data AS operation, c.data AS candidate",
+        "FROM operations AS o JOIN candidates AS c ON c.id = o.candidateId",
+        "WHERE c.projectId = ? AND c.status IN ('published', 'duplicate')",
+        "AND o.projectId = ? AND o.notebookId = ? AND o.status = 'verified'",
+        "AND (o.blockId IN (SELECT value FROM json_each(?))",
+        "OR o.documentId IN (SELECT value FROM json_each(?)))",
+        "ORDER BY o.rowid DESC",
+        "LIMIT ?",
+      ].join(" "),
+      [projectId, projectId, notebookId, list, list, limit],
+    );
+  }
+
+  /**
+   * 依操作識別碼重新讀取同一批發布的現況（不做任何狀態篩選）。
+   *
+   * 搜尋端在最後一次網路等待之後呼叫這個方法，才能發現等待期間的撤回、改歸屬或
+   * 候選狀態變更；資格判斷由呼叫端依現況重新做，不會沿用等待前的快照。
+   */
+  publicationsByOperations(operationIds: readonly string[]): PublicationSnapshot[] {
+    const ids = [...new Set(operationIds)];
+    if (ids.length === 0) return [];
+    return this.publicationRows(
+      [
+        "SELECT o.data AS operation, c.data AS candidate",
+        "FROM operations AS o JOIN candidates AS c ON c.id = o.candidateId",
+        "WHERE o.id IN (SELECT value FROM json_each(?))",
+      ].join(" "),
+      [JSON.stringify(ids)],
+    );
+  }
+
+  /**
    * 保存發布操作。
    *
    * 首次插入固化整個計畫（目標、內容與識別）；同一 `id` 之後只允許合法狀態轉移，
@@ -1202,124 +1517,6 @@ export class Store {
         parsed.createdAt,
         parsed.updatedAt,
       );
-  }
-
-  // ---------------------------------------------------------------- 心智卡
-
-  private activeMentalRow(projectId: string): MentalRow | null {
-    return this.db
-      .query<MentalRow, [string]>(
-        "SELECT id, projectId, revision, data FROM mental_cards WHERE projectId = ? AND status = 'active' ORDER BY revision DESC LIMIT 1",
-      )
-      .get(projectId);
-  }
-
-  mentalCards(projectId?: string): MentalCard[] {
-    const rows =
-      projectId === undefined
-        ? this.db
-            .query<DocumentRow, []>("SELECT id, data FROM mental_cards ORDER BY rowid DESC")
-            .all()
-        : this.db
-            .query<DocumentRow, [string]>(
-              "SELECT id, data FROM mental_cards WHERE projectId = ? ORDER BY rowid DESC",
-            )
-            .all(projectId);
-    return rows.map((row) => mentalCardSchema.parse(JSON.parse(row.data)));
-  }
-
-  activeMental(projectId: string): MentalCard | null {
-    const row = this.activeMentalRow(projectId);
-    return row ? mentalCardSchema.parse(JSON.parse(row.data)) : null;
-  }
-
-  /**
-   * 保存心智卡版本。
-   *
-   * 先判斷是否為既有列：完全相同代表重送已成功的寫入，直接無操作；不同則拒絕覆寫歷史。
-   * 生效版本必須是「以現行版本為基準的下一個版本」：`baseRevision` 等於呼叫端預期基準、
-   * 也等於現行版本，`revision` 必須緊接現行版本；提案保留歷史基準，不取代生效版本。
-   */
-  saveMental(card: MentalCard, expectedBase?: number): void {
-    const parsed = mentalCardSchema.parse(card);
-    this.tx(() => {
-      const existing = this.db
-        .query<MentalRow, [string]>(
-          "SELECT id, projectId, revision, data FROM mental_cards WHERE id = ?",
-        )
-        .get(parsed.id);
-      if (existing) {
-        const stored = mentalCardSchema.parse(JSON.parse(existing.data));
-        if (JSON.stringify(stored) === JSON.stringify(parsed)) return;
-        throw new AppError(
-          "mental_immutable",
-          "既有心智卡版本不可覆寫，請建立新版本。",
-          false,
-          409,
-        );
-      }
-      const active = this.activeMentalRow(parsed.projectId);
-      const currentRevision = active?.revision ?? 0;
-      if (expectedBase !== undefined && expectedBase !== currentRevision) {
-        throw new AppError(
-          "mental_conflict",
-          `專案心智卡已更新為第 ${currentRevision} 版，請以最新版本重新提交。`,
-          false,
-          409,
-        );
-      }
-      if (parsed.status === "active") {
-        if (parsed.baseRevision !== expectedBase || parsed.baseRevision !== currentRevision) {
-          throw new AppError(
-            "mental_conflict",
-            `心智卡生效版本的基準必須是目前第 ${currentRevision} 版。`,
-            false,
-            409,
-          );
-        }
-        if (parsed.revision !== currentRevision + 1) {
-          throw new AppError(
-            "mental_conflict",
-            `心智卡生效版本必須是第 ${currentRevision + 1} 版。`,
-            false,
-            409,
-          );
-        }
-      } else if (parsed.baseRevision !== 0) {
-        const base = this.db
-          .query<{ revision: number }, [string, number]>(
-            "SELECT revision FROM mental_cards WHERE projectId = ? AND revision = ? AND status = 'active' LIMIT 1",
-          )
-          .get(parsed.projectId, parsed.baseRevision);
-        if (!base) {
-          throw new AppError(
-            "mental_conflict",
-            `心智卡提案引用了不存在的生效版本 ${parsed.baseRevision}。`,
-            false,
-            409,
-          );
-        }
-      }
-      try {
-        this.db
-          .query(
-            "INSERT INTO mental_cards (id, projectId, revision, baseRevision, status, author, candidateId, data, createdAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
-          )
-          .run(
-            parsed.id,
-            parsed.projectId,
-            parsed.revision,
-            parsed.baseRevision,
-            parsed.status,
-            parsed.author,
-            parsed.candidateId,
-            JSON.stringify(parsed),
-            parsed.createdAt,
-          );
-      } catch (error) {
-        this.rethrowConflict(error, "心智卡版本");
-      }
-    });
   }
 
   // -------------------------------------------------------- 稽核與來源健康

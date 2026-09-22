@@ -78,22 +78,6 @@ export const candidateDraftSchema = z.object({
 });
 export const extractionSchema = z.object({ candidates: z.array(candidateDraftSchema).max(30) });
 export type CandidateDraft = z.infer<typeof candidateDraftSchema>;
-export const claimSchema = z.object({ text: text.max(2000), sources: z.array(id).min(1).max(30) });
-export const mentalContentSchema = z.object({
-  goals: z.array(claimSchema).max(30),
-  decisions: z.array(claimSchema).max(50),
-  constraints: z.array(claimSchema).max(30),
-  terminology: z.array(claimSchema).max(30),
-  superseded: z.array(claimSchema).max(50),
-});
-export type MentalContent = z.infer<typeof mentalContentSchema>;
-export const emptyMental = (): MentalContent => ({
-  goals: [],
-  decisions: [],
-  constraints: [],
-  terminology: [],
-  superseded: [],
-});
 export const policySchema = z.object({
   instructions: text.max(4000),
   minConfidence: z.number().min(0).max(1),
@@ -230,19 +214,6 @@ export const candidateSchema = z.object({
   updatedAt: isoTime,
 });
 export type Candidate = z.infer<typeof candidateSchema>;
-export const mentalCardSchema = z.object({
-  id,
-  projectId: id,
-  revision: z.number().int(),
-  baseRevision: z.number().int(),
-  content: mentalContentSchema,
-  author: z.enum(["model", "human"]),
-  status: z.enum(["active", "proposal"]),
-  candidateId: id.nullable(),
-  generation: generationMetaSchema.nullable(),
-  createdAt: isoTime,
-});
-export type MentalCard = z.infer<typeof mentalCardSchema>;
 export const relatedNoteSchema = z.object({
   id,
   title: text,
@@ -302,7 +273,6 @@ export const overviewSchema = z.object({
   jobs: z.array(jobSchema),
   candidates: z.array(candidateSchema),
   operations: z.array(operationSchema),
-  mentalCards: z.array(mentalCardSchema),
   audit: z.array(auditSchema),
   sources: z.array(sourceHealthSchema),
 });
@@ -317,10 +287,6 @@ export const reviewRequestSchema = z.object({
   version: z.number().int(),
   action: z.enum(["rejudge", "archive"]),
   draft: candidateDraftSchema.optional(),
-});
-export const mentalEditSchema = z.object({
-  baseRevision: z.number().int(),
-  content: mentalContentSchema,
 });
 export const importResultSchema = z.object({
   import: importRecordSchema,
@@ -341,24 +307,60 @@ export function validateEvidence(draft: CandidateDraft, messages: SourceMessage[
   }
 }
 
-export function validateMentalSources(
-  content: MentalContent,
-  projectId: string,
-  candidates: Candidate[],
-): void {
-  const allowed = new Set(
-    candidates
-      .filter(
-        (candidate) =>
-          candidate.projectId === projectId &&
-          ["published", "duplicate"].includes(candidate.status) &&
-          candidate.judgment?.disposition === "retain",
-      )
-      .map((candidate) => candidate.id),
-  );
-  for (const claim of Object.values(content).flat()) {
-    if (claim.sources.some((source) => !allowed.has(source))) {
-      throw new AppError("invalid_mental_source", "心智卡只能引用此專案已確認的候選來源。");
-    }
-  }
-}
+export const captureRequestSchema = z.object({
+  schemaVersion: z.literal(1),
+  captureId: id,
+  branchLeafId: id.nullable(),
+  conversation: conversationSchema.refine(
+    (conversation) =>
+      conversation.messages.every((message) => ["user", "assistant"].includes(message.role)),
+    "Automatic capture accepts original user and assistant dialogue only.",
+  ),
+});
+export type CaptureRequest = z.infer<typeof captureRequestSchema>;
+export const captureResponseSchema = z.object({
+  captureId: id,
+  importId: id,
+  jobId: id,
+  duplicate: z.boolean(),
+});
+export type CaptureResponse = z.infer<typeof captureResponseSchema>;
+
+/**
+ * 顯式知識搜尋的請求：由使用者（或明確的按需工具呼叫）提供專案與查詢字串。
+ * 一般對話回合、自動續接與工作階段啟動都不會發出這個請求，也沒有自動注入的路徑。
+ */
+export const searchRequestSchema = z.object({
+  projectId: id,
+  query: z.string().min(1).max(4000),
+  limit: z.number().int().min(1).max(10).default(5),
+  maxChars: z.number().int().min(500).max(16000).default(8000),
+});
+export type SearchRequest = z.infer<typeof searchRequestSchema>;
+/**
+ * 單一搜尋結果：一律是思源裡的現況筆記，附上授權與來源資訊。
+ * `revision` 是現況內容的摘要，`edited` 表示內容已與當初寫入的簽收不同。
+ */
+export const searchNoteSchema = z.object({
+  candidateId: id,
+  operationId: id,
+  documentId: id,
+  blockId: id,
+  title: text.max(160),
+  text: z.string().max(16000),
+  revision: id,
+  edited: z.boolean(),
+  truncated: z.boolean(),
+  source: z.object({
+    source: id,
+    sourceSessionId: id,
+    sourceRevision: id,
+    messageIds: z.array(id).max(30),
+  }),
+});
+export const searchResponseSchema = z.object({
+  projectId: id,
+  notes: z.array(searchNoteSchema).max(10),
+  truncated: z.boolean(),
+});
+export type SearchResponse = z.infer<typeof searchResponseSchema>;

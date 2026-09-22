@@ -200,3 +200,169 @@ The existing production notes are not the failure-injection environment.
 
 No product-code implementation is authorized until the user approves the latest
 planning summary. The first-release scope and deferrals are owned by `prd.md`.
+
+## Hands-free integration design — planning increment
+
+The new user path is normal chat -> durable background capture -> existing
+extraction/Jev/publication -> automatic contextual recall in a later chat.
+The existing panel is an inspection/control surface, not the trigger.
+Scope and live-data authorization are owned by PRD R10/R11.
+
+### Service boundary
+
+Add `POST /api/capture` and `POST /api/recall` with shared schemas in
+`src/contracts/index.ts`. An adapter credential is separate from cloud and
+SiYuan credentials, server-side scoped to explicitly enabled project IDs.
+Keep the existing loopback, expected-host, JSON, and hostile-Origin checks;
+native local adapters can omit Origin. Do not bypass these checks or expose
+other project data through a convenience overview request.
+
+Capture carries a stable capture ID, source namespace, original session and
+message identities, branch provenance, and completed new dialogue. The server
+acknowledges only durable acceptance. Resending the same identity/content returns
+the original acceptance; reusing an identity with different content is a conflict.
+Normalize through the existing source boundary and reuse Store.ingest and its
+publication protections. Do not manufacture timestamps or hide missing parents.
+
+Use a local durable delivery queue in the adapter, not network completion as a
+capture cursor. Keep activation/session baselines and message revisions so an
+acknowledgement loss or restart cannot lose accepted dialogue or enqueue all old
+history. Do not resubmit an entire growing session after every turn. The existing
+directory poller remains an explicit legacy/manual acquisition option, not the
+new automatic rollout mechanism, and cannot be a second owner of the same source.
+
+Recall requests carry a project ID and the current user query. Return a bounded
+snapshot of eligible active context plus relevant current SiYuan excerpts, with
+block/document/source identifiers, content revision, and truncation indicators.
+Do not echo the raw query into routine logs or call another model merely to fetch
+local memories. An empty result is valid; no cross-project fallback is allowed.
+
+### Search and freshness
+
+Use SiYuan's actual `/api/search/fullTextSearchBlock` for body search, with bounded
+query terms and results. The read-only probe in
+`research/handsfree-service.json` confirms Chinese, numeric, and English queries.
+This is full-text retrieval, not a claim of embedding or semantic equivalence.
+
+Search path values contain a notebook ID plus an internal node-ID path, not the
+human-readable `rootPath`. Search only within an approved scope and revalidate
+the returned block/document against notebook, managed root, project ownership,
+and a verified publication before returning content. A broad notebook hit by
+itself is not authorization. Never inject the search API's highlighted HTML;
+read current plain/Kramdown source through the existing SiYuan client.
+
+Derive recall eligibility from the current operation and live block, not just
+`candidate.status`. Exclude undone, undoing, uncertain, conflicted, deleted, and
+out-of-scope material. Return a human-edited owned note's current content and
+mark its changed revision rather than substituting an old candidate draft.
+Omit derived mental claims whose source was withdrawn or changed; a stale card
+cannot override the live note. Do not introduce a second independently updated
+withdrawn flag merely to support recall.
+
+### Adapter and context invariants
+
+Ship adapter source here and load it through OMP's supported extension mechanism.
+Root-session completion drives background capture; the next ordinary user turn
+drives bounded recall. Capture only original user/assistant dialogue, never
+thinking, system instructions, tool payloads, subagent transcripts, or the memory
+snapshot itself. Preserve parent/session identity instead of flattening branches.
+
+Use `agent_end` with `willContinue` false for capture, after root/session/branch
+validation. OMP 18.2.3 also invokes `before_agent_start` for automatic continuations;
+that hook may stage a bounded recall but cannot alone authorize a new injection.
+
+Apply recall through the `context` hook's cloned user-message view, following the
+existing persistent-anchor pattern rather than adding a transient tail message.
+Bind a snapshot to the genuine user message's original content, timestamp, and
+session. Replay every previously bound snapshot byte-for-byte on follow-ups,
+retries, and resume. Persist explicit empty/timeout outcomes too: recovery during
+a tool follow-up must not insert text into an already-sent user message.
+
+Do not write the injected view into the raw transcript, change system prompts or
+tools, or rewrite provider-specific payloads. A newly staged result must match
+the new human anchor; an automatic continuation cannot reuse it for an older turn.
+Concrete inspected host contracts are in `research/handsfree-omp.json`.
+
+The adapter must have bounded foreground work; all generation, Jev judgment,
+publication, and mental maintenance remain background service work. An outage
+leaves capture pending and recall visibly degraded without stopping normal chat.
+
+### Project cutover and rollout
+
+After explicit approval, enable one project mapping, a source activation boundary,
+and a selected notebook/root. Suggested initial mapping is this repository to a
+new `siyuan-agent-system` project under `/HandsFree` in the isolated
+`Agent Validation` notebook. Do not mix prior synthetic validation project memory
+into this project's automatic context.
+
+Give the enabled project one automatic memory owner. At a fresh session boundary,
+preserve task role bindings and set project-scoped `hindsight.autoRecall`,
+`hindsight.autoRetain`, and `hindsight.mentalModelsEnabled` to false; disable the
+existing Jev memory-gate extension only in this project. Hindsight environment
+flags outrank YAML, so verify effective flags and refuse activation if ownership
+still conflicts. Do not erase global Hindsight configuration/history or change
+unrelated projects. Disabling the adapter stops future collection/recall while
+retaining durable pending and accepted operation history.
+
+### Proof and release criterion
+
+The decisive scenario is two real sandboxed OMP conversations: the first stores
+synthetic knowledge without a memory command, the second receives it automatically
+in its outgoing context without a recall command. Provider calls and SiYuan writes
+use the already approved synthetic/isolated boundary. Add independent restart,
+lost acknowledgement, cross-project isolation, outage, human-edit, withdrawal,
+prefix-stability, and feedback-loop cases per AC12–AC19. Hook-unit success alone
+does not establish the complete user behavior.
+
+The real OMP capture probe requires persisted sandbox sessions; do not use
+`--no-session`, because the root-only adapter intentionally skips in-memory
+sessions that cannot be classified. A load-only `omp models -e ...` result
+establishes loading, not the memory loop. Keep native credentials/databases
+outside the sandbox and use only the explicitly approved synthetic cloud setup.
+
+## Human-first cutover — 2026-09-22 (supersedes memory-owner design)
+
+Keep the source-independent capture/extraction/Jev/publication service. Hindsight
+owns automatic LLM memory; this service owns human-readable knowledge publishing.
+Do not replace Hindsight or add another per-turn retrieval/mental-model loop.
+
+Contract shared by parallel implementation slices:
+
+- Replace `/api/recall` with authenticated `POST /api/search`; no compatibility
+  alias. Export `SearchRequest`, `SearchResponse`, `searchRequestSchema`,
+  `searchResponseSchema` and `searchNoteSchema` from `src/contracts/index.ts`.
+  Request fields retain projectId/query/limit/maxChars and their current bounds.
+  Response is `{ projectId, notes, truncated }`; notes preserve all current
+  authorization, current-content, source and revision fields. There is no mental
+  field. Capture contract is unchanged.
+- OMP registers a stable `siyuan_search` tool at startup. It takes query plus
+  optional limit/maxChars; projectId is bound by trusted adapter configuration,
+  not supplied by the model. Describe it as explicit/on-demand SiYuan lookup,
+  not ordinary-turn memory retrieval. Results are untrusted tool data with
+  provenance, never context-hook injection. No new cloud call is needed to search.
+- Remove before_agent_start/context recall hooks, anchor construction/replay and
+  the Hindsight competing-owner gate. Keep original-dialogue filtering and the
+  durable outbox, consumed ledger, baseline and shutdown bounds. Legacy persisted
+  capture state must upgrade without dropping pending/consumed data or backfill;
+  retired anchor snapshots must not be replayed or destructively reset.
+- Remove active mental schemas/API/UI/provider generation and worker updates.
+  Keep historical stored rows on disk, but remove their runtime use. Extraction
+  and Jev receive actual source evidence and scoped existing notes, not a parallel
+  derived mental model. Publishing ends after verified publication.
+- Installer preserves all Hindsight/gate settings, including inherited extension
+  arrays, and does not reject active Hindsight. Main restores the known rollout
+  overrides in this project only after the new adapter is verified.
+- UI consumes Overview without mentalCards and removes the mental panel/API.
+  Existing import, review, settings/history, provenance and safe rendering stay.
+
+Ownership: backend slice owns src/ and backend tests; adapter slice owns
+integrations/omp and its tests; installer slice owns setup-omp and its tests;
+frontend slice owns web/. Main owns documentation, project configuration,
+deployment, integration and final verification. No slice runs validation during
+concurrent editing. No product code in the installed OMP/Trellis is patched.
+
+Deployment uses a new session boundary. Do not attempt to preserve the retired
+injected-view prefix by retaining hidden compatibility hooks. Existing raw
+transcripts and persistent capture identity remain intact. Formal connection
+requires a separate clean service state and a confirmed production managed root;
+synthetic projects/jobs/notes must not be redirected to the production kernel.
