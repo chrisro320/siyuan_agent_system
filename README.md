@@ -1,8 +1,8 @@
 # SiYuan 對話知識整理與發布
 
-獨立的 Bun／SQLite 服務，把獲准的新對話整理成**給人閱讀的思源筆記**：正常聊天 → 背景增量收集 → Ollama Cloud 抽取候選 → TypeSafe Jev 判斷 → 發布到指定思源筆記本。**Hindsight 仍是 LLM 的主要自動記憶系統**；本服務不做每輪自動召回、不注入對話上下文、不維護另一套心智模型。需要時可以明確要求 AI 搜尋思源。繁體中文面板用於查看、修正與排障，其他客戶端可用通用 API 或手動匯入。
+獨立的 Bun／SQLite 服務，把獲准的新對話整理成**給人閱讀的思源筆記**：正常聊天 → 背景增量收集 → 設定的生成端點抽取候選 → TypeSafe Jev 判斷 → 發布到指定思源筆記本。**Hindsight 仍是 LLM 的主要自動記憶系統**；本服務不做每輪自動召回、不注入對話上下文、不維護另一套心智模型。需要時可以明確要求 AI 搜尋思源。繁體中文面板用於查看、修正與排障，其他客戶端可用通用 API 或手動匯入。
 
-摘錄與可讀知識生成固定使用 **Ollama Cloud `deepseek-v4.1-flash`**；不使用本機推論、不自動替換模型。Jev 使用 `jev-latest`，紀錄回應中的實際模型名稱。**這不是離線工具。**
+抽取可選 OpenAI 相容 API（`/chat/completions`）或原生 Ollama（`/api/chat`）；預設仍是 Antigravity 相容端點與 `gemini-3.7-flash-medium`。兩者共用本機輸出與引文驗證，不會在失敗時自動切換服務或模型。Jev 使用 `jev-latest`，維持獨立的發布否決權；即使生成端點在本機，**整條流程仍不是離線工具**。
 
 ## 啟動
 
@@ -21,9 +21,14 @@ docker compose ps
 
 | 環境變數 | 用途 |
 | --- | --- |
-| `OLLAMA_API_KEY` | Ollama Cloud Key |
+| `GENERATION_PROTOCOL` | 初次啟動的協定：`openai-compatible`（預設）或 `ollama`；未知協定會被拒絕 |
+| `GENERATION_BASE_URL` | 初次啟動的端點基底網址，預設 `http://127.0.0.1:7861/antigravity/v1`；不得包含帳密、查詢或 fragment |
+| `GENERATION_MODEL` | 初次啟動的模型 ID，預設 `gemini-3.7-flash-medium`；模型回報身分須與設定值一致 |
+| `GENERATION_AUTH_MODE` | `bearer`（預設）或 `none`；`none` 僅允許 `127.0.0.0/8`、`[::1]` 等 loopback IP 字面端點，不送 Authorization |
+| `GENERATION_API_KEY` | `bearer` 模式的伺服器端 Key；不要使用 OMP 的 OAuth 憑證 |
+| `GENERATION_API_KEY_ORIGIN` | 選填；Key 被允許送達的精確 origin。留空綁定環境變數 `GENERATION_BASE_URL` 的 origin；面板切換到其他來源時，須在伺服器端明示相符 origin 和 Key，遠端 `bearer` 僅接受 HTTPS |
 | `TYPESAFE_API_KEY` | TypeSafe Jev Key |
-| `SIYUAN_URL` | 後端可連到的思源 HTTP 根網址；本機服務可使用 `http://host.docker.internal:6806`，前提是思源接受該連線 |
+| `SIYUAN_URL` | 後端可連到的思源 HTTP 根網址；桌面思源只監聽本機時使用 `http://127.0.0.1:6806` |
 | `SIYUAN_TOKEN` | 對應工作空間的 API Token |
 | `SIYUAN_PUBLIC_URL` | 選填；瀏覽器可開啟的思源根網址。留空時使用 `siyuan://blocks/…` |
 | `PORT` | 對外本機連接埠，預設 `8787` |
@@ -32,15 +37,17 @@ docker compose ps
 | `ADAPTER_TOKEN` / `ADAPTER_TOKEN_FILE` | 背景採集／按需搜尋專用 Bearer 權杖；直接值優先，未設定時介面不啟用 |
 | `ADAPTER_PROJECTS` | 允許採集與搜尋的專案 ID，以逗號分隔；同時需要面板中的目的地設定 |
 
-三個憑據也支援對應的 `_FILE` 變數，例如 `OLLAMA_API_KEY_FILE=/run/secrets/ollama-key`。`./secrets` 會唯讀掛載到 `/run/secrets`，檔案必須讓容器內 `bun` 使用者可讀；直接環境值優先於檔案。
+所有憑據也支援對應的 `_FILE` 變數，例如 `GENERATION_API_KEY_FILE=/run/secrets/generation-key`。`./secrets` 會唯讀掛載到 `/run/secrets`，檔案必須讓容器內 `bun` 使用者可讀；直接環境值優先於檔案。面板只能調整非秘密的協定、端點、模型及驗證模式，無法輸入或讀取 Key。`none` 模式即使環境中仍有 Key，也不會送出 Authorization。
 
-Compose 只綁定 `127.0.0.1`。此版**沒有多使用者登入或權限系統**，不得直接公開到網際網路。需要遠端存取時，另行部署有驗證的安全入口。
+既有 Ollama 安裝可在「設定與操作」選擇 `ollama`、`http://127.0.0.1:11434`、實際模型 ID 與 `none`，或由伺服器環境變數設定同一組初次啟動值；其他網址需依上表設定安全驗證及憑據來源。既有 `OLLAMA_API_KEY` 不再使用。面板儲存只留下「待生效」草稿，不會改變正在執行或新建立工作的生成端點；**重新啟動服務後**才啟用。切換後，先前未完成的工作（包含尚未開始抽取者）會停止並顯示 `generation_config_changed`；一般重試不會改送新端點，只能由使用者明確按「重新處理」建立新工作。舊候選與已驗證回條保留，不會自動重送或發布。
 
-若桌面思源只監聽 `127.0.0.1:6806`，Docker bridge 的 `host.docker.internal` 無法連線。Linux 可採 host networking，並同時把應用程式 `HOST` 明確設為 `127.0.0.1`、`PORT` 設為面板埠，移除 Compose 的 ports 映射並調整 healthcheck。不要為了容器連線把未設驗證的思源公開到區域網路。正式與測試服務必須使用不同資料卷，不把測試工作佇列改指正式思源。
+Compose 使用 Linux host networking，以便容器連線到僅監聽主機 `127.0.0.1:7861` 的生成服務。應用程式仍只監聽 `127.0.0.1`，此版**沒有多使用者登入或權限系統**，不得直接公開到網際網路。需要遠端存取時，另行部署有驗證的安全入口。
+
+若桌面思源只監聽 `127.0.0.1:6806`，請把 `SIYUAN_URL` 設為 `http://127.0.0.1:6806`；host networking 不需透過 Docker bridge 的 `host.docker.internal`。正式與測試服務必須使用不同資料卷，不把測試工作佇列改指正式思源。
 
 ## 啟用 OMP 背景知識發布
 
-需求：Bun 1.3.14；原生 OMP 已以 18.2.3 實測。服務端與轉接器使用同一個獨立權杖；以權限 `0600` 的檔案保存，勿使用 Ollama／Jev／思源的憑據代替。Docker 的 `_FILE` 路徑必須是容器內可讀的掛載路徑。
+需求：Bun 1.3.14；原生 OMP 已以 18.2.3 實測。服務端與轉接器使用同一個獨立權杖；以權限 `0600` 的檔案保存，勿使用生成模型／Jev／思源的憑據代替。Docker 的 `_FILE` 路徑必須是容器內可讀的掛載路徑。
 
 1. 在服務端設定權杖與 `ADAPTER_PROJECTS`，在面板設定相同專案 ID 的目的地。
 2. 在本程式目錄建置，再替目標專案安裝：
@@ -92,7 +99,7 @@ API 亦可送出 `POST /api/import`，JSON 欄位為 `format`（`conversation`�
 1. **概覽**：工作階段、實際錯誤、退避重試、來源健康。缺少憑據或供應商失敗會保留來源並顯示失敗，不產生假結果。
 2. **候選審閱**：查看原文、引文及 Jev 各題回答。可修正候選後重新送 Jev，或僅封存。人工修改仍不能略過 Jev 的保留閘門。
 3. **匯入與來源**：明確提供對話或文字，檢查來源範圍；正常啟用的 OMP 新會話不需要每次手動匯入。
-4. **設定與操作**：目的地、政策、排除來源、遮蔽詞、操作回執與撤回。設定採版本檢查；跨分頁更新不覆蓋未送出的草稿。
+4. **設定與操作**：目的地、政策、排除來源、遮蔽詞、生成供應商的待生效設定、操作回執與撤回。生成草稿和一般政策各用自己的版本檢查；跨分頁更新不覆蓋未送出的草稿。
 
 相同來源版本重複匯入沿用既有工作。來源文字改變則保存新版本；想用新政策重新判斷，請按「重新處理」。修正會建立新的候選／工作並保留舊紀錄，不覆寫歷史。
 

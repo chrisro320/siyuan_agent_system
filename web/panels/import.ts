@@ -135,7 +135,7 @@ export function createImportPanel(ctx: AppContext): Surface {
       el("h3", { text: "匯入內容" }),
       el("p", {
         class: "warn-text",
-        text: "提醒：送出的內容會上傳到 Ollama Cloud 與 TypeSafe Jev 進行雲端處理，不是離線操作。請勿匯入你無權處理的資料。",
+        text: "提醒：送出的內容會上傳到伺服器設定的生成端點與 TypeSafe Jev，並非離線處理。請勿匯入你無權處理的資料。",
       }),
       labelled("來源格式", formatSelect),
       labelled("專案 ID", projectInput),

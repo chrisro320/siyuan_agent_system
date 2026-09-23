@@ -5,7 +5,8 @@ import {
   type Candidate,
   candidateDraftSchema,
   captureRequestSchema,
-  GENERATION_MODEL,
+  type GenerationProfileStatus,
+  generationProfileUpdateSchema,
   type Overview,
   reviewRequestSchema,
   searchRequestSchema,
@@ -16,9 +17,9 @@ import {
 import { acceptCapture, search } from "../memory";
 import { errorInfo, type Worker } from "../pipeline/worker";
 import { normalizeImport, redactConversation } from "../sources";
-import { digest } from "../storage/identity";
+import { digest, generationFingerprint } from "../storage/identity";
 import type { Store } from "../storage/store";
-import type { Config } from "./config";
+import { type Config, checkedGenerationProfile } from "./config";
 
 /**
  * 常數時間比較轉接器憑據：內容長度不同即不同，長度相同才逐位比較，
@@ -35,11 +36,10 @@ function observable(error: unknown): boolean {
   return !(error instanceof AppError) || error.retryable || error.status >= 500;
 }
 
-export function createApp(
-  config: Config,
-  store: Store,
-  worker: Worker,
-): (request: Request) => Promise<Response> {
+/** 同源 HTTP 處理器：由 `createApp` 產生，伺服器與測試都以這個型別轉接。 */
+export type AppHandler = (request: Request) => Promise<Response>;
+
+export function createApp(config: Config, store: Store, worker: Worker): AppHandler {
   const expected = new URL(config.publicOrigin);
   const adapterToken = config.adapterToken?.trim() ?? "";
   const adapterProjects = config.adapterProjects ?? [];
@@ -65,6 +65,27 @@ export function createApp(
       "default-src 'self'; connect-src 'self'; script-src 'self'; style-src 'self'; img-src 'self' data:; frame-ancestors 'none'; base-uri 'none'; form-action 'self'",
     "Cache-Control": "no-store",
   };
+
+  /**
+   * 生成設定的現況：`active` 是啟動時凍結的選擇，`staged` 是已保存但尚未生效的草稿
+   * （沒有草稿時等於生效值）。兩者都只有非機密欄位，憑據只以存在性呈現。
+   *
+   * 需要重啟的判斷用生效值與草稿的指紋相比：寫法差異（尾斜線、空白）在儲存時就已
+   * 正規化，因此不會出現「內容相同卻一直顯示待重啟」。
+   */
+  const generationStatus = (): GenerationProfileStatus => {
+    const active = config.activeGeneration;
+    const staged = store.stagedGeneration();
+    const effective = staged?.profile ?? active;
+    return {
+      active,
+      staged: effective,
+      revision: staged?.revision ?? 0,
+      pendingRestart: generationFingerprint(effective) !== generationFingerprint(active),
+      credentialConfigured: config.generationKey !== null,
+    };
+  };
+
   return async (request) => {
     const url = new URL(request.url);
     const path = url.pathname;
@@ -129,15 +150,18 @@ export function createApp(
         }
       }
       if (path === "/api/overview" && method === "GET") {
+        const generation = generationStatus();
         const overview: Overview = {
           providers: {
-            ollamaConfigured: Boolean(config.ollamaKey),
+            generationConfigured:
+              generation.active.authMode === "none" || generation.credentialConfigured,
             jevConfigured: Boolean(config.jevKey),
             siyuanConfigured: Boolean(config.siyuanUrl),
-            generationModel: GENERATION_MODEL,
+            generationModel: generation.active.model,
             siyuanPublicUrl: config.siyuanPublicUrl ?? "",
           },
           settings: store.settings(),
+          generationProfile: generation,
           allowedOmpRoots: config.allowedOmpRoots,
           jobs: store.jobs(),
           candidates: store.candidates(),
@@ -182,6 +206,16 @@ export function createApp(
       }
       if (path === "/api/notebooks" && method === "GET")
         return json(await worker.siyuan.notebooks());
+      // 生成設定草稿：只寫非機密欄位，且與一般設定各自的 revision 樂觀鎖互不影響。
+      // 儲存不會改變執行中的 worker、既有工作或 Jev 政策；重啟後才會生效。
+      if (path === "/api/generation-profile" && method === "PUT") {
+        const input = generationProfileUpdateSchema.parse(await request.json());
+        store.saveGenerationProfile({
+          revision: input.revision,
+          profile: checkedGenerationProfile(input.profile),
+        });
+        return json(generationStatus());
+      }
       const candidateMatch = path.match(/^\/api\/candidates\/([^/]+)(\/review)?$/);
       if (candidateMatch?.[1]) {
         const candidate = store.getCandidate(decodeURIComponent(candidateMatch[1]));
@@ -315,6 +349,17 @@ export function createApp(
               throw new AppError(
                 "job_not_retryable",
                 "只有失敗或等待重試的工作可以重試。",
+                false,
+                409,
+              );
+            }
+            if (
+              !reprocess &&
+              previous.generationFingerprint !== store.activeGenerationFingerprint()
+            ) {
+              throw new AppError(
+                "generation_config_changed",
+                "生成設定已變更，請使用重新處理，而不是重試舊工作。",
                 false,
                 409,
               );

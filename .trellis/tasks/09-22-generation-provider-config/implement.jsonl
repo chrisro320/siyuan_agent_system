@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend guideline entry point; read Runtime Contracts provider, storage and verification sections by range on demand. The full contract exceeds context injection byte cap."}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend guideline entry point for the settings-panel change."}
+{"file":".trellis/spec/frontend/control-panel.md","reason":"Preserve DOM safety, dirty drafts, cross-tab CAS, four-panel layout and browser verification."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Trace staged settings, startup activation, durable job fingerprint and UI status through all layers."}

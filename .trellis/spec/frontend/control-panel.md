@@ -11,6 +11,7 @@ Required for `web/` changes. The UI is Traditional Chinese, dependency-light DOM
 - `ctx.mutate({ button, work })` handles pending/error state and refresh; restore the original button label in all paths.
 - `reviewCandidate(id, version, action, draft?) -> { candidateId, jobId }` selects the returned candidate after correction.
 - `saveSettings(settings, rawBase) -> Settings`; `putSettings(..., onSaved)` updates revision/baseline after every successful mutation.
+- `saveGenerationProfile(revision, profile) -> GenerationProfileStatus` sends `PUT /api/generation-profile` with only `{ revision, profile }`; `Overview.generationProfile` is the read source for active/staged status. `generationProfileUpdateSchema` and `generationProfileStatusSchema` are shared with the backend.
 - `noteHref(id, siyuanPublicUrl)` uses the configured browser-facing SiYuan URL or native `siyuan://` when absent.
 
 ## 3. Contracts
@@ -18,6 +19,10 @@ Required for `web/` changes. The UI is Traditional Chinese, dependency-light DOM
 Four human-facing surfaces remain mounted: overview, import/sources, candidate review, and settings/operation history. There is no mental-card panel or API; `Overview` has no `mentalCards`. Hindsight owns automatic LLM memory, and this panel must not describe publication as replacing it. `.panel[hidden] { display: none; }` overrides panel layout declarations. Remove the initial loading placeholder; after initial overview failure, a successful retry restores the actual surfaces.
 
 Polling is every five seconds. Each panel controls safe updates. Persist unsent inputs independently of fetched state; dirty means a baseline comparison. Another tab's settings revision shows a stale warning and preserves the draft. Reload explicitly discards it after confirmation. A saved settings response becomes the new baseline, so an immediate second save succeeds.
+
+The existing settings surface owns a separate generation draft and baseline: `{ protocol, baseUrl, model, authMode }`. Its status shows the boot-frozen active profile, staged profile, `revision`, `pendingRestart` and presence-only `credentialConfigured`; `none` means no credential is needed, not that one is configured. A save stages a profile without changing the current worker or `Settings.policy` revision. On polling, never rebuild a dirty generation form; if its revision moved in another tab, preserve the draft, show a stale warning and disable save until an explicit reload. A successful save adopts the returned revision/baseline so two consecutive saves work. No fifth navigation surface and no secret input, API field or DOM value.
+
+When a clean generation form remains focused and another tab saves a newer profile, polling must replace the visible controls together with the adopted profile object. Preserving focus is subordinate to showing current server values; otherwise an old input's handler mutates the new profile while the user sees stale fields. Dirty drafts still remain untouched and warn on revision conflict.
 
 Notebook loading only updates its status slot and select options; it must not rebuild policy/destination inputs. Failure exposes a retry button in the same slot. Keep new-destination inputs while polling or loading notebooks.
 
@@ -37,6 +42,10 @@ Render source excerpts, full normalized originals, source/message identifiers, m
 | Candidate changes during user edit | Preserve input; CAS error remains actionable |
 | Successful mutation | Restore button state, refresh actual backend data |
 | Missing provider configuration | Presence-only status, never secret values |
+| Staged generation change before restart | Show active versus staged and restart notice; keep worker selection unchanged |
+| Old generation-profile revision with unsent edits | Preserve draft, warn, disable save; reload only after deliberate discard |
+| No-auth active profile | Show credential as unnecessary; do not claim a key exists |
+| Invalid protocol/endpoint/auth choice | Show backend `invalid_generation_profile`; never silently choose another endpoint |
 
 ## 5. Good / Base / Bad Cases
 
@@ -44,6 +53,9 @@ Render source excerpts, full normalized originals, source/message identifiers, m
 - Base: importing an example creates a persistent job and exposes its actual decision.
 - Bad: checking only `document.activeElement` for dirty state, copying a stale settings revision after save, or leaving the old candidate selected after correction.
 - Bad: constructing a native-only note link before provider configuration has loaded and never refreshing it.
+- Good: two tabs edit separate generation revisions; the losing tab keeps its unsent draft until an explicit reload.
+- Base: saving a profile shows a restart notice while the running model remains unchanged.
+- Bad: label a no-auth profile “credentials configured” or overwrite a dirty form during polling.
 
 ## 6. Required Verification
 
@@ -57,11 +69,14 @@ Run `bun run typecheck`, `bun run build`, and `bun run lint`. The actual browser
 6. Import, retry, candidate correction, and opening the actual SiYuan note work through the panel.
 7. Provider keys are absent from UI/API payloads. Scan in memory and print only pass/fail or paths, never matching values.
 8. Exactly four navigation entries are present; legacy `#mental` falls back to overview. No mental-card endpoint is requested. Historical source text may mention mental models; that does not make it an active UI feature.
+9. Edit protocol/endpoint/model/auth in the existing settings surface; after two polling cycles the unsent values remain. Save twice using returned revisions; active stays fixed and staged displays a restart warning. In a second tab save a newer revision; the first tab must preserve its draft and disable save. Restart an isolated service and confirm active becomes staged. For `none`, the credential label is “not needed”, not “configured”.
+10. Browser regression: leave the model input focused but unchanged in tab A; save a different protocol, endpoint, model and auth mode in tab B. After polling, tab A's visible four controls must match the new staged profile. Edit only its model and save; the server must retain tab B's other three fields, not values from stale DOM.
 
 Machine checks with the built-in `grep` tool:
 
 - `path="web"`, `pattern="innerHTML\\s*=|outerHTML\\s*=|as any\\b|: any\\b|@ts-ignore"`: no matches.
 - `path="web/main.ts;web/panels/review.ts;web/panels/settings.ts;web/panels/import.ts;web/style.css"`, `pattern="panel\\[hidden\\]|replaceChildren|formBaseline|savedSettings|detailPublicUrl"`: inspect the shared lifecycle and dirty-state boundaries, not merely match counts.
+- `path="web/api.ts;web/panels/settings.ts;src/contracts/index.ts"`, `pattern="generationProfileStatusSchema|generationProfileUpdateSchema|credentialConfigured|pendingRestart|revision_conflict"`: inspect shared schema validation, presence-only status, separate CAS and dirty draft preservation.
 
 ## 7. Wrong vs Correct
 
@@ -71,7 +86,16 @@ Machine checks with the built-in `grep` tool:
 
 // Correct: consume the authoritative returned revision.
 const saved = await saveSettings(draft, raw);
+
 // Feed saved into the panel's revision/baseline update callback.
+```
+
+Generation profile: wrong—copy the staged revision into ordinary policy settings or derive credential presence from `authMode === "none"`. Correct—call `saveGenerationProfile(revision, profile)` and adopt its returned status; display `credentialConfigured` only as presence and the no-auth mode as “not needed”.
+
+```ts
+// Separate profile CAS: the returned revision becomes the next edit baseline.
+const status = await saveGenerationProfile(profileRevision, profileDraft);
+profileRevision = status.revision;
 ```
 
 Root-cause record: per-panel rendering passed static checks while authored CSS overrode `hidden`, initial errors detached surfaces, and candidate detail raced overview state. Real cold-load, failure/retry, and background-update scenarios are mandatory after lifecycle changes. The two publication-link callsites (`review.ts`, `settings.ts`) must migrate together.

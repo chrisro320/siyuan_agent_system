@@ -111,7 +111,11 @@ export interface JsonPostRequest {
   url: string;
   /** The credential may only ever be sent to this exact origin. */
   allowedOrigin: string;
-  apiKey: string;
+  /**
+   * Bearer credential, or `null` for an endpoint that is explicitly configured
+   * without authentication. `null` omits the Authorization header entirely.
+   */
+  apiKey: string | null;
   /** Pre-serialized payload, so the size guard measures exactly what is sent. */
   body: string;
   fetchImpl: FetchLike;
@@ -121,21 +125,26 @@ export interface JsonPostRequest {
 }
 
 /**
- * Posts JSON with the credential attached. Every transport or provider failure
- * becomes an AppError that describes the status class only: neither request
- * headers nor the raw response body are copied, so a credential or a provider
- * payload cannot leak through error text or logs.
+ * Posts JSON, attaching the credential only when the caller has one to attach.
+ * The caller owns whether this endpoint may receive a credential at all. Every
+ * transport or provider failure becomes an AppError that describes the status
+ * class only: neither request headers nor the raw response body are copied, so a
+ * credential or a provider payload cannot leak through error text or logs.
  */
 export async function postJson(request: JsonPostRequest): Promise<unknown> {
   const { providerLabel } = request;
   if (new URL(request.url).origin !== request.allowedOrigin) {
     throw new AppError(
       "provider_misconfigured",
-      `${providerLabel} 的請求端點不是允許的官方來源，已停止呼叫以免外洩憑據。`,
+      `${providerLabel} 的請求端點不是允許的來源，已停止呼叫以免外洩憑據。`,
       false,
       500,
     );
   }
+  const headers: Record<string, string> = { "content-type": "application/json" };
+  // An explicitly unauthenticated endpoint carries no Authorization header at
+  // all, even when an unrelated credential is still configured server-side.
+  if (request.apiKey !== null) headers.authorization = `Bearer ${request.apiKey}`;
 
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), request.timeoutMs ?? MODEL_TIMEOUT_MS);
@@ -144,10 +153,7 @@ export async function postJson(request: JsonPostRequest): Promise<unknown> {
     try {
       response = await request.fetchImpl(request.url, {
         method: "POST",
-        headers: {
-          "content-type": "application/json",
-          authorization: `Bearer ${request.apiKey}`,
-        },
+        headers,
         body: request.body,
         signal: controller.signal,
         redirect: "error",

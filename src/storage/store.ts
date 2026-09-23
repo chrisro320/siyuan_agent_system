@@ -12,6 +12,11 @@ import {
   candidateSchema,
   conversationSchema,
   defaultSettings,
+  type ErrorInfo,
+  type GenerationProfile,
+  type GenerationProfileUpdate,
+  generationProfileSchema,
+  generationProfileUpdateSchema,
   type ImportRecord,
   type ImportRequest,
   id,
@@ -30,6 +35,7 @@ import {
 } from "../contracts/index.ts";
 import {
   digest,
+  generationFingerprint,
   messageKeyOf,
   messageRevisionOf,
   newId,
@@ -38,7 +44,7 @@ import {
   sourceKeyOf,
 } from "./identity.ts";
 
-const SCHEMA_VERSION = 3;
+const SCHEMA_VERSION = 4;
 
 /**
  * 第一版結構。每一條 unique 都對應一種不可混淆的身分：來源版本、工作執行與發布操作。
@@ -215,6 +221,26 @@ CREATE INDEX candidates_status ON candidates(projectId, status);
 `;
 
 /**
+ * 第四版結構：生成供應商設定的草稿鏈與每件工作的生成身分。
+ *
+ * `generation_profiles` 只保存非機密的 profile 草稿（協定／端點／模型／認證模式）與
+ * 各自的 revision，憑據、原始回應與模型輸出都不進入此表。它與 `settings` 是兩條
+ * 獨立的版本鏈：改供應商不會使 Jev 政策失效，反之亦然。
+ *
+ * `jobs.generationProfile` 是工作建立時釘住的生成指紋。舊資料庫的既有列在遷移後為
+ * `NULL`，代表「不知道原本由哪個供應商產生」；未完成的工作一律視為與目前設定不符而
+ * 停止，不會被猜成目前設定。
+ */
+const SCHEMA_V4 = `
+CREATE TABLE generation_profiles (
+  revision INTEGER PRIMARY KEY,
+  data TEXT NOT NULL,
+  createdAt TEXT NOT NULL
+);
+ALTER TABLE jobs ADD COLUMN generationProfile TEXT;
+`;
+
+/**
  * 依序套用的結構遷移。索引 0 對應 `user_version` 1。
  *
  * 新安裝會依序跑完所有版本；既有資料庫只補跑缺少的版本，不會重建或改寫既有資料表。
@@ -233,6 +259,9 @@ const MIGRATIONS: readonly ((db: Database) => void)[] = [
   },
   (db) => {
     db.run(SCHEMA_V3);
+  },
+  (db) => {
+    db.run(SCHEMA_V4);
   },
 ];
 
@@ -325,6 +354,7 @@ export type CaptureReceipt = z.infer<typeof captureReceiptSchema>;
 interface JobRow {
   id: string;
   importId: string;
+  generationProfile: string | null;
   policyRevision: number;
   status: string;
   attempts: number;
@@ -436,12 +466,21 @@ function notFound(kind: string, id: string): never {
 }
 
 /**
- * 讀取 job 的 SQLite 列。`promptVersion` 是索引欄位，不屬於對外 DTO。
+ * job 的完整欄位清單。所有讀取路徑共用同一份清單，避免新增欄位時漏掉某一條查詢，
+ * 讓同一件工作在不同呼叫端出現不同內容。
+ */
+const JOB_COLUMNS =
+  "id, importId, generationProfile, policyRevision, status, attempts, nextAttemptAt, error, nextSegment, extractionComplete, extractionPlan, run, createdAt, updatedAt";
+
+/**
+ * 讀取 job 的 SQLite 列。`promptVersion` 是索引欄位，不屬於對外 DTO；
+ * `generationProfile` 欄位保存的是生成指紋，對外以 `generationFingerprint` 呈現。
  */
 function readJob(row: JobRow): Job {
   return jobSchema.parse({
     id: row.id,
     importId: row.importId,
+    generationFingerprint: row.generationProfile,
     policyRevision: row.policyRevision,
     status: row.status,
     attempts: row.attempts,
@@ -666,6 +705,95 @@ export class Store {
         `設定由第 ${currentRevision} 版更新為第 ${nextRevision} 版。`,
       );
       return saved;
+    });
+  }
+
+  // -------------------------------------------------- 生成供應商設定
+
+  /**
+   * 開機凍結的生成身分指紋。只在啟動流程設定，且必須在任何工作被建立或執行之前完成；
+   * 之後草稿改變也不會影響它，執行中的 worker 與新工作的指紋都以此為準。
+   */
+  private activeFingerprint: string | null = null;
+
+  /**
+   * 凍結目前的生效生成選擇。這是啟動流程的動作，不是使用者操作：
+   * 儲存草稿不會呼叫它，因此正在執行與新建立的工作都不會中途被換掉設定。
+   */
+  activateGeneration(profile: GenerationProfile): void {
+    this.activeFingerprint = generationFingerprint(generationProfileSchema.parse(profile));
+  }
+
+  /**
+   * 生效選擇的指紋，也是新工作釘住的值。尚未啟用時為 `null`：這樣的工作與舊資料庫
+   * 留下的未知身分同樣會被視為不符，不會被當成目前設定而誤用。
+   */
+  activeGenerationFingerprint(): string | null {
+    return this.activeFingerprint;
+  }
+
+  /** 已保存的生成選擇草稿；沒有草稿時 `null`，代表生效設定是唯一選擇。 */
+  stagedGeneration(): { profile: GenerationProfile; revision: number } | null {
+    const row = this.db
+      .query<{ revision: number; data: string }, []>(
+        "SELECT revision, data FROM generation_profiles ORDER BY revision DESC LIMIT 1",
+      )
+      .get();
+    if (!row) return null;
+    try {
+      return {
+        profile: generationProfileSchema.parse(JSON.parse(row.data)),
+        revision: row.revision,
+      };
+    } catch {
+      // 讀不出來的草稿不猜測、也不略過：啟動時就必須停下來讓人看見，而不是安靜地
+      // 換回上一個供應商。訊息不含列內容，避免把資料庫裡的片段外洩到日誌。
+      throw new AppError(
+        "generation_profile_corrupt",
+        "已保存的生成設定無法解讀，已停止啟動以免誤用其他供應商。",
+        false,
+        500,
+      );
+    }
+  }
+
+  /**
+   * 儲存生成選擇草稿。
+   *
+   * 以讀取當下的 `revision` 做樂觀鎖；版本鏈與一般設定各自獨立，因此改供應商不會讓
+   * Jev 政策失效，反之亦然。寫入的 profile 由呼叫端先正規化，所以同一個選擇不會因
+   * 尾斜線或空白等寫法差異而變成另一個版本。這裡只寫草稿：生效設定、既有工作與已
+   * 驗證的發布都不會改變。
+   */
+  saveGenerationProfile(update: GenerationProfileUpdate): {
+    profile: GenerationProfile;
+    revision: number;
+  } {
+    const parsed = generationProfileUpdateSchema.parse(update);
+    return this.tx(() => {
+      const current = this.stagedGeneration()?.revision ?? 0;
+      if (parsed.revision !== current) {
+        throw new AppError(
+          "revision_conflict",
+          `生成設定已變更為第 ${current} 版，請重新載入後再儲存。`,
+          false,
+          409,
+        );
+      }
+      const next = current + 1;
+      try {
+        this.db
+          .query("INSERT INTO generation_profiles (revision, data, createdAt) VALUES (?, ?, ?)")
+          .run(next, JSON.stringify(parsed.profile), now());
+      } catch (error) {
+        this.rethrowConflict(error, "生成設定版本");
+      }
+      this.insertAudit(
+        "generation-profile.saved",
+        String(next),
+        `生成設定草稿更新為第 ${next} 版，重新啟動後才會生效。`,
+      );
+      return { profile: parsed.profile, revision: next };
     });
   }
 
@@ -980,7 +1108,7 @@ export class Store {
     if (!forceNewRun) {
       const row = this.db
         .query<JobRow, [string]>(
-          "SELECT id, importId, policyRevision, status, attempts, nextAttemptAt, error, nextSegment, extractionComplete, extractionPlan, run, createdAt, updatedAt FROM jobs WHERE importId = ? ORDER BY rowid DESC LIMIT 1",
+          `SELECT ${JOB_COLUMNS} FROM jobs WHERE importId = ? ORDER BY rowid DESC LIMIT 1`,
         )
         .get(importId);
       if (row) return readJob(row);
@@ -1004,6 +1132,8 @@ export class Store {
     const job: Job = jobSchema.parse({
       id: newId(),
       importId,
+      // 開機凍結的生成身分：不論是手動匯入、自動擷取或重新處理，都釘住同一個來源。
+      generationFingerprint: this.activeGenerationFingerprint(),
       policyRevision,
       status: "queued",
       attempts: 0,
@@ -1026,11 +1156,12 @@ export class Store {
   private insertJobRow(job: Job): void {
     this.db
       .query(
-        "INSERT INTO jobs (id, importId, policyRevision, promptVersion, run, status, attempts, nextAttemptAt, error, nextSegment, extractionComplete, extractionPlan, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "INSERT INTO jobs (id, importId, generationProfile, policyRevision, promptVersion, run, status, attempts, nextAttemptAt, error, nextSegment, extractionComplete, extractionPlan, createdAt, updatedAt) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
       )
       .run(
         job.id,
         job.importId,
+        job.generationFingerprint,
         job.policyRevision,
         PROMPT_VERSION,
         job.run,
@@ -1057,18 +1188,14 @@ export class Store {
 
   jobs(): Job[] {
     return this.db
-      .query<JobRow, []>(
-        "SELECT id, importId, policyRevision, status, attempts, nextAttemptAt, error, nextSegment, extractionComplete, extractionPlan, run, createdAt, updatedAt FROM jobs ORDER BY rowid DESC",
-      )
+      .query<JobRow, []>(`SELECT ${JOB_COLUMNS} FROM jobs ORDER BY rowid DESC`)
       .all()
       .map(readJob);
   }
 
   getJob(jobId: string): Job {
     const row = this.db
-      .query<JobRow, [string]>(
-        "SELECT id, importId, policyRevision, status, attempts, nextAttemptAt, error, nextSegment, extractionComplete, extractionPlan, run, createdAt, updatedAt FROM jobs WHERE id = ?",
-      )
+      .query<JobRow, [string]>(`SELECT ${JOB_COLUMNS} FROM jobs WHERE id = ?`)
       .get(jobId);
     if (!row) notFound("工作", jobId);
     return readJob(row);
@@ -1077,7 +1204,13 @@ export class Store {
   saveJob(job: Job): void {
     const parsed = jobSchema.parse(job);
     const stored = this.getJob(parsed.id);
-    for (const key of ["importId", "policyRevision", "run", "createdAt"] as const) {
+    for (const key of [
+      "importId",
+      "generationFingerprint",
+      "policyRevision",
+      "run",
+      "createdAt",
+    ] as const) {
       if (parsed[key] !== stored[key])
         throw new AppError("job_identity_immutable", "工作身分不可改變。", false, 409);
     }
@@ -1617,6 +1750,53 @@ export class Store {
           `${rows.length} 件進行中的工作已排入重試。`,
         );
       }
+    });
+  }
+
+  /**
+   * 開機時停止與目前生效生成指紋不符的未完成工作。
+   *
+   * - 未完成指 worker 還能續行的狀態，包含尚未開始抽取的 `queued`：即使一則訊息都還沒
+   *   送出去，也不能在新設定下繼續。
+   * - 舊版資料庫的列在遷移後沒有指紋（`NULL`），代表不知道原本由哪個供應商產生；
+   *   一律視為不符，不猜測、也不改寫既有候選或已驗證的發布。
+   * - 停止只留下可見的錯誤與稽核紀錄；要改用目前設定必須由使用者明示重新處理，
+   *   那會建立新的執行並釘住目前指紋。
+   *
+   * 呼叫端必須先 `recoverInterrupted`，否則進行中的工作還停在原狀態。
+   */
+  stopStaleGenerationJobs(): void {
+    const fingerprint = this.activeGenerationFingerprint();
+    this.tx(() => {
+      const stale = this.db
+        .query<JobRow, []>(
+          `SELECT ${JOB_COLUMNS} FROM jobs WHERE status IN ('queued', 'retry-wait', 'extracting', 'judging', 'ready', 'writing')`,
+        )
+        .all()
+        .map(readJob)
+        .filter((job) => job.generationFingerprint !== fingerprint);
+      if (stale.length === 0) return;
+      const timestamp = now();
+      const stop = this.db.query(
+        "UPDATE jobs SET status = 'failed', error = ?, nextAttemptAt = NULL, updatedAt = ? WHERE id = ?",
+      );
+      for (const job of stale) {
+        stop.run(
+          JSON.stringify({
+            code: "generation_config_changed",
+            message: "這件工作建立時的生成設定與目前不同，已停止；請重新處理以使用目前設定。",
+            stage: "generation-config",
+            retryable: false,
+          } satisfies ErrorInfo),
+          timestamp,
+          job.id,
+        );
+      }
+      this.insertAudit(
+        "recovery.generation-changed",
+        "jobs",
+        `${stale.length} 件未完成工作因生成設定變更而停止，等待使用者明示重新處理。`,
+      );
     });
   }
 }

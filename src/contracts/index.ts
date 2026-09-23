@@ -1,6 +1,5 @@
 import { z } from "zod";
 
-export const GENERATION_MODEL = "deepseek-v4.1-flash";
 export const MAX_SOURCE_BYTES = 64 * 1024 * 1024;
 export const PROMPT_VERSION = "extract-1";
 export const text = z.string().trim().min(1).max(100_000);
@@ -120,6 +119,46 @@ export const defaultSettings = (): Settings => ({
   destinations: [],
   ompRoots: [],
 });
+
+/**
+ * 生成角色的非機密選擇：協定、端點、模型與認證模式。憑據本身永遠不在此結構內。
+ *
+ * `baseUrl` 只描述端點的字面值，真正能否使用由伺服器端在儲存與啟動時驗證；
+ * 面板只會看到這四個欄位，沒有憑據或原始回應。
+ */
+export const generationProfileSchema = z.object({
+  protocol: z.enum(["openai-compatible", "ollama"]),
+  baseUrl: z.string().trim().min(1).max(2048),
+  model: z.string().trim().min(1).max(200),
+  authMode: z.enum(["bearer", "none"]),
+});
+export type GenerationProfile = z.infer<typeof generationProfileSchema>;
+
+/**
+ * 生成設定的現況：`active` 是啟動時凍結的生效選擇，`staged` 是已保存的草稿
+ * （沒有草稿時等於 `active`）。`pendingRestart` 代表兩者不同，需要重啟才會生效。
+ *
+ * `credentialConfigured` 只是「伺服器端是否具備可用憑據」的存在性，不含憑據值。
+ */
+export const generationProfileStatusSchema = z.object({
+  active: generationProfileSchema,
+  staged: generationProfileSchema,
+  revision: z.number().int().nonnegative(),
+  pendingRestart: z.boolean(),
+  credentialConfigured: z.boolean(),
+});
+export type GenerationProfileStatus = z.infer<typeof generationProfileStatusSchema>;
+
+/**
+ * 草稿寫入：以讀取當下的 `revision` 做樂觀鎖，與一般設定的 revision 各自獨立，
+ * 因此改供應商不會使 Jev 政策失效，也不會互相覆寫。
+ */
+export const generationProfileUpdateSchema = z.object({
+  revision: z.number().int().nonnegative(),
+  profile: generationProfileSchema,
+});
+export type GenerationProfileUpdate = z.infer<typeof generationProfileUpdateSchema>;
+
 export const usageSchema = z.record(z.string(), z.number().finite().nonnegative());
 export const generationMetaSchema = z.object({
   model: text,
@@ -184,6 +223,11 @@ export type ImportRecord = z.infer<typeof importRecordSchema>;
 export const jobSchema = z.object({
   id,
   importId: id,
+  /**
+   * 建立這件工作時生效的生成選擇指紋（非機密）。工作只在自己的指紋與目前生效
+   * 設定一致時才能續行；`null` 代表舊版資料庫留下的未知身分，一律視為不符。
+   */
+  generationFingerprint: z.string().nullable(),
   policyRevision: z.number().int(),
   status: jobStatusSchema,
   attempts: z.number().int(),
@@ -262,13 +306,14 @@ export const sourceHealthSchema = z.object({
 export type SourceHealth = z.infer<typeof sourceHealthSchema>;
 export const overviewSchema = z.object({
   providers: z.object({
-    ollamaConfigured: z.boolean(),
+    generationConfigured: z.boolean(),
     jevConfigured: z.boolean(),
     siyuanConfigured: z.boolean(),
     generationModel: text,
     siyuanPublicUrl: z.string().default(""),
   }),
   settings: settingsSchema,
+  generationProfile: generationProfileStatusSchema,
   allowedOmpRoots: z.array(z.string()),
   jobs: z.array(jobSchema),
   candidates: z.array(candidateSchema),

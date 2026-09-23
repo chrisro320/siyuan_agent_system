@@ -4,12 +4,18 @@ services:
     restart: unless-stopped
     init: true
     stop_grace_period: 150s
-    ports:
-      - "127.0.0.1:${PORT:-8787}:8787"
+    network_mode: host
     environment:
+      HOST: 127.0.0.1
+      PORT: ${PORT:-8787}
       PUBLIC_ORIGIN: ${PUBLIC_ORIGIN:-http://localhost:${PORT:-8787}}
-      OLLAMA_API_KEY: ${OLLAMA_API_KEY:-}
-      OLLAMA_API_KEY_FILE: ${OLLAMA_API_KEY_FILE:-}
+      GENERATION_PROTOCOL: ${GENERATION_PROTOCOL:-openai-compatible}
+      GENERATION_BASE_URL: ${GENERATION_BASE_URL:-http://127.0.0.1:7861/antigravity/v1}
+      GENERATION_MODEL: ${GENERATION_MODEL:-gemini-3.7-flash-medium}
+      GENERATION_AUTH_MODE: ${GENERATION_AUTH_MODE:-bearer}
+      GENERATION_API_KEY_ORIGIN: ${GENERATION_API_KEY_ORIGIN:-}
+      GENERATION_API_KEY: ${GENERATION_API_KEY:-}
+      GENERATION_API_KEY_FILE: ${GENERATION_API_KEY_FILE:-}
       TYPESAFE_API_KEY: ${TYPESAFE_API_KEY:-}
       TYPESAFE_API_KEY_FILE: ${TYPESAFE_API_KEY_FILE:-}
       SIYUAN_URL: ${SIYUAN_URL:-}
@@ -27,7 +33,7 @@ services:
     extra_hosts:
       - "host.docker.internal:host-gateway"
     healthcheck:
-      test: ["CMD", "bun", "-e", "const r=await fetch('http://localhost:8787/health');process.exit(r.ok?0:1)"]
+      test: ["CMD", "bun", "-e", "const r=await fetch('http://localhost:${PORT:-8787}/health');process.exit(r.ok?0:1)"]
       interval: 15s
       timeout: 5s
       retries: 3

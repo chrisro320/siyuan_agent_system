@@ -1,5 +1,5 @@
 import { createHash, randomUUID } from "node:crypto";
-import type { Conversation, SourceMessage } from "../contracts/index.ts";
+import type { Conversation, GenerationProfile, SourceMessage } from "../contracts/index.ts";
 
 /**
  * 來源記錄的內容摘要。原始快照檔名、來源版本與訊息版本一律使用此值。
@@ -63,6 +63,20 @@ function messageSemantics(message: SourceMessage) {
  */
 export function messageRevisionOf(message: SourceMessage): string {
   return digest(JSON.stringify(messageSemantics(message)));
+}
+
+/**
+ * 生成角色的身分指紋：協定、端點、模型與認證模式。
+ *
+ * 這是工作建立時要釘住的非機密身分，也是判斷「同一組生成設定」的唯一依據。
+ * 憑據輪替、逾時或使用量都不改變它；換協定、端點、模型或認證模式則會改變。
+ * 傳入值必須是正規化後的 profile（端點去尾斜線、模型去空白），否則同一個選擇
+ * 會因寫法不同而產生不同指紋。
+ */
+export function generationFingerprint(profile: GenerationProfile): string {
+  return digest(
+    JSON.stringify([profile.protocol, profile.baseUrl, profile.model, profile.authMode]),
+  );
 }
 
 /**

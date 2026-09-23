@@ -2,11 +2,16 @@ import { AppError } from "../contracts";
 import { Worker } from "../pipeline/worker";
 import { Store } from "../storage/store";
 import { createApp } from "./app";
-import { loadConfig } from "./config";
+import { loadConfig, resolveGeneration } from "./config";
 
 try {
-  const config = await loadConfig();
-  const store = new Store(config.dataDir);
+  // 開機順序是契約的一部分：環境設定先解析（不合法即拒絕啟動），已保存的生成草稿再
+  // 決定生效選擇，最後在任何工作被建立或執行之前凍結它。因此新工作的生成身分、執行中
+  // 的 worker 與面板顯示的生效值三者一致，草稿要等下一次啟動才會生效。
+  const environment = await loadConfig();
+  const store = new Store(environment.dataDir);
+  const config = resolveGeneration(environment, store.stagedGeneration()?.profile ?? null);
+  store.activateGeneration(config.activeGeneration);
   const worker = new Worker(store, config);
   const server = Bun.serve({
     hostname: config.hostname,

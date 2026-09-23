@@ -1,9 +1,16 @@
 // 設定與操作歷史面板：政策（instructions／門檻／遮蔽詞／排除來源）、
 // 目的地（notebook 與受管根目錄）對應，以及操作歷史狀態、憑證、錯誤與撤回。
 // 所有設定以完整 Settings 加 revision CAS 送出，並保留伺服器端未知欄位。
+// 產生供應商（協定／端點／模型／驗證模式）以獨立的 profile revision CAS 儲存，
+// 只送出非秘密欄位；憑據只以「是否已設定」呈現，永遠不會進入 DOM 或請求內容。
 
-import { type Destination, destinationSchema } from "../../src/contracts";
-import { fetchNotebooks, undoOperation } from "../api";
+import {
+  type Destination,
+  destinationSchema,
+  type GenerationProfile,
+  generationProfileSchema,
+} from "../../src/contracts";
+import { fetchNotebooks, saveGenerationProfile, undoOperation } from "../api";
 import type { AppContext, AppState, Surface } from "../context";
 import {
   button,
@@ -50,6 +57,23 @@ function numberField(
   return labelled(label, control);
 }
 
+// 產生供應商草稿：只有非秘密欄位，並帶上讀取當下的 profile revision 做 CAS。
+interface ProfileDraft {
+  revision: number;
+  profile: GenerationProfile;
+}
+
+// 選項值以契約型別標註，事件回呼以查表取得而不是強制轉型，避免選到契約外的值。
+const PROTOCOL_OPTIONS: { value: GenerationProfile["protocol"]; label: string }[] = [
+  { value: "openai-compatible", label: "OpenAI 相容 API（/chat/completions）" },
+  { value: "ollama", label: "原生 Ollama（/api/chat）" },
+];
+
+const AUTH_MODE_OPTIONS: { value: GenerationProfile["authMode"]; label: string }[] = [
+  { value: "bearer", label: "Bearer 憑據（伺服器端提供）" },
+  { value: "none", label: "無驗證（僅限 loopback 端點）" },
+];
+
 export function createSettingsPanel(ctx: AppContext): Surface {
   const node = el("div", { class: "panel panel-settings" });
   const operationsSection = el("section", { class: "card" });
@@ -62,6 +86,32 @@ export function createSettingsPanel(ctx: AppContext): Surface {
   const staleSlot = el("div");
   let newDestination = { projectId: "", notebookId: "", rootPath: "" };
   const hasNewDestination = () => Object.values(newDestination).some((value) => value !== "");
+
+  // 產生供應商區塊：狀態列永遠可安全重繪，表單只在使用者沒有未送出內容時重建。
+  const profileSection = el("section", { class: "card" });
+  const profileStatusSlot = el("div", { class: "status-slot" });
+  const profileFormSlot = el("div");
+  let profileDraft: ProfileDraft | null = null;
+  let profileBaseline = "";
+  let profileServerRevision = -1;
+  let profileForceRender = false;
+  let profileSaveButton: HTMLButtonElement | null = null;
+  const profileFingerprint = (draft: ProfileDraft): string =>
+    JSON.stringify({ revision: draft.revision, profile: draft.profile });
+  const profileDirty = (): boolean =>
+    profileDraft !== null && profileFingerprint(profileDraft) !== profileBaseline;
+
+  profileSection.append(
+    el("h3", { text: "產生供應商與模型" }),
+    hint(
+      "這裡編輯的是非秘密的供應商選擇：協定、端點基底 URL、模型 ID 與驗證模式。" +
+        "儲存只會更新「待生效」設定，重新啟動服務後才會由新的供應商處理抽取；" +
+        "Jev 的保留判定、門檻與發佈否決不受影響。" +
+        "憑據只存在伺服器端（環境變數或掛載檔案），面板只顯示是否已設定，永遠不會顯示或傳送憑據內容。",
+    ),
+    profileStatusSlot,
+    profileFormSlot,
+  );
 
   function savedSettings(saved: AppState["overview"]["settings"]): void {
     baseline = settingsFingerprint({ ...saved, raw: saved });
@@ -177,6 +227,210 @@ export function createSettingsPanel(ctx: AppContext): Surface {
       }
       if (actions.childElementCount > 0) block.append(actions);
       operationsSection.append(block);
+    }
+  }
+
+  // 產生供應商狀態列：目前生效、待生效、重新啟動需求、憑據存在與否，以及跨分頁的 revision 衝突。
+  // 只呈現契約欄位，憑據只有布林存在性，沒有值。
+  function renderProfileStatus(state: AppState): void {
+    const status = state.overview.generationProfile;
+    const active = status.active;
+    const staged = status.staged;
+    const activeProtocol =
+      PROTOCOL_OPTIONS.find((option) => option.value === active.protocol)?.label ?? active.protocol;
+    const activeAuth =
+      AUTH_MODE_OPTIONS.find((option) => option.value === active.authMode)?.label ??
+      active.authMode;
+    const stagedProtocol =
+      PROTOCOL_OPTIONS.find((option) => option.value === staged.protocol)?.label ?? staged.protocol;
+    const stagedAuth =
+      AUTH_MODE_OPTIONS.find((option) => option.value === staged.authMode)?.label ??
+      staged.authMode;
+    const stagedDiffers = JSON.stringify(staged) !== JSON.stringify(active);
+
+    profileStatusSlot.replaceChildren(
+      el("div", { class: "provider-row" }, [
+        el("span", { class: "provider-name", text: "目前生效（執行中）" }),
+        chip(activeProtocol, "info"),
+        el("span", {
+          class: "provider-note",
+          text: `${active.model}｜${active.baseUrl}｜${activeAuth}`,
+        }),
+      ]),
+      el("div", { class: "provider-row" }, [
+        el("span", { class: "provider-name", text: "伺服器憑據" }),
+        active.authMode === "none"
+          ? chip("不需要", "neutral")
+          : status.credentialConfigured
+            ? chip("已設定", "ok")
+            : chip("未設定", "danger"),
+        el("span", {
+          class: "provider-note",
+          text:
+            active.authMode === "none"
+              ? "目前生效設定為無驗證模式，不需要憑據。"
+              : status.credentialConfigured
+                ? "憑據只保存在伺服器端；面板與 API 只回報是否存在。"
+                : "bearer 模式需要伺服器端憑據，未設定前請求會失敗。",
+        }),
+      ]),
+    );
+
+    if (status.pendingRestart || stagedDiffers) {
+      profileStatusSlot.append(
+        notice(
+          "warn",
+          `待生效設定：${stagedProtocol}｜${staged.model}｜${staged.baseUrl}｜${stagedAuth}。` +
+            "重新啟動服務後才會生效；正在執行與新建立的工作在重新啟動前仍使用上方目前生效的供應商。",
+        ),
+      );
+    } else {
+      profileStatusSlot.append(hint("目前沒有待生效的供應商變更。"));
+    }
+
+    if (profileDraft !== null && profileDraft.revision !== status.revision) {
+      profileStatusSlot.append(
+        notice(
+          "warn",
+          `後端供應商設定的 revision 已變成 ${status.revision}（你讀取的是 ${profileDraft.revision}）。` +
+            "你的草稿仍保留；請按「放棄草稿並重新載入」取得最新版本後再儲存，以免覆寫其他分頁的變更。",
+        ),
+      );
+    }
+  }
+
+  // 表單只在使用者沒有未送出內容時重建，所以輪詢不會覆蓋正在編輯的欄位或游標位置。
+  function renderProfileForm(): void {
+    if (profileDraft === null) return;
+    const profile = profileDraft.profile;
+    const stale = profileDraft.revision !== profileServerRevision;
+
+    const protocolSelect = selectControl({ options: PROTOCOL_OPTIONS, value: profile.protocol });
+    protocolSelect.addEventListener("change", () => {
+      const picked = PROTOCOL_OPTIONS.find((option) => option.value === protocolSelect.value);
+      if (picked !== undefined) profile.protocol = picked.value;
+    });
+    const baseUrlInput = inputControl({
+      value: profile.baseUrl,
+      placeholder: "https://主機/基底路徑",
+    });
+    baseUrlInput.addEventListener("input", () => {
+      profile.baseUrl = baseUrlInput.value.trim();
+    });
+    const modelInput = inputControl({ value: profile.model, placeholder: "模型 ID" });
+    modelInput.addEventListener("input", () => {
+      profile.model = modelInput.value.trim();
+    });
+    const authSelect = selectControl({ options: AUTH_MODE_OPTIONS, value: profile.authMode });
+    authSelect.addEventListener("change", () => {
+      const picked = AUTH_MODE_OPTIONS.find((option) => option.value === authSelect.value);
+      if (picked !== undefined) profile.authMode = picked.value;
+    });
+
+    const saveProfile = button(
+      "儲存供應商設定",
+      (node) => {
+        const current = profileDraft;
+        if (current === null) return;
+        const validated = generationProfileSchema.safeParse(current.profile);
+        if (!validated.success) {
+          ctx.notice(
+            "danger",
+            `供應商設定未通過契約檢查：${validated.error.issues
+              .map((issue) => `${issue.path.join(".") || "(root)"} ${issue.message}`)
+              .join("；")}`,
+          );
+          return;
+        }
+        ctx.mutate({
+          button: node,
+          work: async () => {
+            const saved = await saveGenerationProfile(current.revision, validated.data);
+            profileDraft = {
+              revision: saved.revision,
+              profile: structuredClone(saved.staged),
+            };
+            profileBaseline = profileFingerprint(profileDraft);
+            profileForceRender = true;
+            return saved.pendingRestart
+              ? "已儲存供應商設定；重新啟動服務後才會由新的供應商處理工作。"
+              : "已儲存供應商設定；與目前生效設定相同。";
+          },
+        });
+      },
+      { variant: "primary", disabled: stale },
+    );
+    profileSaveButton = saveProfile;
+
+    profileFormSlot.replaceChildren(
+      el("article", { class: "row-card" }, [
+        labelled("協定（實際連線方式）", protocolSelect),
+        labelled("端點基底 URL", baseUrlInput),
+        labelled("模型 ID", modelInput),
+        labelled("驗證模式", authSelect),
+        hint(
+          "openai-compatible 會呼叫基底 URL 下的 /chat/completions，ollama 會呼叫 /api/chat；" +
+            "模型 ID 會與回應回報的身分比對，不符時會直接失敗，不會改用其他供應商。" +
+            "端點只接受 http(s) 且不得含帳密、查詢字串或 fragment，重新導向不會被跟隨。" +
+            "bearer 模式的憑據取自伺服器端環境變數；改用其他來源需在伺服器端一併設定憑據來源。" +
+            "無驗證模式僅允許 loopback 端點，且不會送出 Authorization 標頭。",
+        ),
+        el("div", { class: "row-actions" }, [
+          saveProfile,
+          button("放棄草稿並重新載入", (node) => {
+            if (
+              profileDirty() &&
+              !window.confirm("重新載入會丟棄你目前未儲存的供應商設定變更，確定嗎？")
+            ) {
+              ctx.notice("info", "已保留目前供應商設定草稿。");
+              return;
+            }
+            profileDraft = null;
+            profileForceRender = true;
+            ctx.mutate({
+              button: node,
+              work: async () => {
+                await ctx.refresh();
+                return "已重新載入後端供應商設定。";
+              },
+            });
+          }),
+        ]),
+      ]),
+    );
+  }
+
+  function renderProfile(state: AppState): void {
+    const status = state.overview.generationProfile;
+    profileServerRevision = status.revision;
+    const serverDraft: ProfileDraft = {
+      revision: status.revision,
+      profile: structuredClone(status.staged),
+    };
+    // 草稿乾淨時才接受伺服器版本；有未送出內容時一律保留本地草稿並由狀態列提示衝突。
+    if (
+      profileDraft === null ||
+      (!profileDirty() && profileFingerprint(profileDraft) !== profileFingerprint(serverDraft))
+    ) {
+      profileDraft = serverDraft;
+      profileBaseline = profileFingerprint(serverDraft);
+      // A focused but clean input still shows the old DOM value; adopting a newer
+      // server draft must replace that form too, or its handlers edit the new object
+      // while the user sees the previous tab's values.
+      profileForceRender = true;
+    }
+    renderProfileStatus(state);
+    // 表單保留未送出草稿時不會重建，因此儲存鈕的停用狀態要跟著最新的 revision 更新。
+    if (profileSaveButton !== null) {
+      profileSaveButton.disabled =
+        profileDraft === null || profileDraft.revision !== profileServerRevision;
+    }
+    const editing =
+      profileDirty() ||
+      (document.activeElement !== null && profileSection.contains(document.activeElement));
+    if (profileForceRender || !editing) {
+      profileForceRender = false;
+      renderProfileForm();
     }
   }
 
@@ -454,6 +708,7 @@ export function createSettingsPanel(ctx: AppContext): Surface {
     node.replaceChildren(
       staleSlot,
       policySection,
+      profileSection,
       destinationSection,
       ompSection,
       saveRow,
@@ -512,6 +767,7 @@ export function createSettingsPanel(ctx: AppContext): Surface {
         staleSlot.replaceChildren(
           notice("warn", "後端設定已更新；你的未儲存草稿仍保留，請按「重新載入設定」再修改。"),
         );
+        renderProfile(state);
         renderOperations(state);
         return;
       }
@@ -519,11 +775,13 @@ export function createSettingsPanel(ctx: AppContext): Surface {
         draft = draftFrom(state);
         baseline = settingsFingerprint(draft);
         lastRevision = revision;
+        renderProfile(state);
         renderSettings(state);
         renderOperations(state);
         return;
       }
-      // 使用者正在編輯或有未儲存變更時，只更新唯讀的操作歷史，不重建表單。
+      // 使用者正在編輯或有未儲存變更時，只更新唯讀的操作歷史與供應商狀態，不重建表單。
+      renderProfile(state);
       renderOperations(state);
       const editing =
         hasNewDestination() ||
@@ -534,11 +792,13 @@ export function createSettingsPanel(ctx: AppContext): Surface {
     isDirty: () =>
       (draft !== null && settingsDirty(draft, baseline)) ||
       hasNewDestination() ||
+      profileDirty() ||
       (document.activeElement !== null && node.contains(document.activeElement)),
     activated: () => {
       if (notebooks === null && notebooksError === null) void loadNotebooks();
       if (ctx.state !== null) {
         renderOperations(ctx.state);
+        renderProfile(ctx.state);
         if (draft !== null && !settingsDirty(draft, baseline)) renderSettings(ctx.state);
       }
     },

@@ -5,6 +5,10 @@ import {
   type CandidateDetail,
   candidateDetailSchema,
   errorInfoSchema,
+  type GenerationProfile,
+  type GenerationProfileStatus,
+  generationProfileStatusSchema,
+  generationProfileUpdateSchema,
   type ImportRequest,
   importResultSchema,
   type Notebook,
@@ -148,6 +152,18 @@ export async function saveSettings(settings: Settings, rawBase: unknown): Promis
   };
   const { payload } = await send("/api/settings", { method: "PUT", body });
   return parseContract(settingsSchema, payload, "設定");
+}
+
+// 產生供應商設定是非秘密的 profile，且使用自己的 revision 做 CAS，與一般設定的樂觀鎖互不影響。
+// 送出前先以共享 update schema 收斂欄位，契約外的東西（例如憑據）不可能隨草稿被送出去；
+// 回應一律以共享 status schema 驗證，面板因此只有一個 DTO 來源。
+export async function saveGenerationProfile(
+  revision: number,
+  profile: GenerationProfile,
+): Promise<GenerationProfileStatus> {
+  const body = generationProfileUpdateSchema.parse({ revision, profile });
+  const { payload } = await send("/api/generation-profile", { method: "PUT", body });
+  return parseContract(generationProfileStatusSchema, payload, "產生供應商設定");
 }
 
 export async function fetchNotebooks(): Promise<Notebook[]> {

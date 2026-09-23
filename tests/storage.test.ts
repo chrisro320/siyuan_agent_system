@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, beforeEach, describe, expect, test } from "bun:test";
 import { existsSync, mkdtempSync, readdirSync, readFileSync, rmSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
@@ -6,11 +7,13 @@ import {
   AppError,
   type Candidate,
   type Conversation,
+  type GenerationProfile,
   type ImportRequest,
   type Operation,
 } from "../src/contracts/index.ts";
 import {
   digest,
+  generationFingerprint,
   messageKeyOf,
   messageRevisionOf,
   now,
@@ -18,6 +21,14 @@ import {
   sourceKeyOf,
 } from "../src/storage/identity.ts";
 import { Store } from "../src/storage/store.ts";
+
+/** 測試用的生效生成選擇：內容不重要，指紋穩定才重要。 */
+const generationProfile: GenerationProfile = {
+  protocol: "openai-compatible",
+  baseUrl: "http://127.0.0.1:7861/antigravity/v1",
+  model: "gemini-3.7-flash-medium",
+  authMode: "bearer",
+};
 
 function tempDataDir(): string {
   return mkdtempSync(join(tmpdir(), "siyuan-store-"));
@@ -636,6 +647,166 @@ describe("Store 設定版本", () => {
     expect((thrown as AppError).status).toBe(404);
     expect(() => store.settings()).not.toThrow();
   });
+});
+
+describe("Store 生成供應商設定與工作指紋", () => {
+  let dataDir: string;
+  let store: Store;
+
+  beforeEach(() => {
+    dataDir = tempDataDir();
+    store = new Store(dataDir);
+  });
+
+  afterEach(() => {
+    store.close();
+    rmSync(dataDir, { recursive: true, force: true });
+  });
+
+  test("草稿有自己的版本鏈，儲存它不會改動一般設定或生效設定", () => {
+    expect(store.stagedGeneration()).toBeNull();
+    expect(store.activeGenerationFingerprint()).toBeNull();
+
+    const first = store.saveGenerationProfile({ revision: 0, profile: generationProfile });
+    expect(first).toEqual({ profile: generationProfile, revision: 1 });
+    expect(store.stagedGeneration()).toEqual({ profile: generationProfile, revision: 1 });
+
+    // 過期的 revision 不覆寫更新的草稿。
+    expect(() =>
+      store.saveGenerationProfile({
+        revision: 0,
+        profile: { ...generationProfile, model: "other" },
+      }),
+    ).toThrow(AppError);
+    expect(store.stagedGeneration()?.profile.model).toBe(generationProfile.model);
+
+    const second = store.saveGenerationProfile({
+      revision: 1,
+      profile: { ...generationProfile, model: "other" },
+    });
+    expect(second.revision).toBe(2);
+    // 一般設定的版本鏈完全不受影響，草稿也不會改變生效設定。
+    expect(store.settings().revision).toBe(0);
+    expect(store.activeGenerationFingerprint()).toBeNull();
+    expect(store.audits().some((row) => row.action === "generation-profile.saved")).toBe(true);
+  });
+
+  test("未啟用時建立的工作沒有生成身分，啟用後釘住指紋且不可改寫", async () => {
+    const { job: legacy, import: record } = await store.ingest(buildRequest(), buildConversation());
+    expect(legacy.generationFingerprint).toBeNull();
+
+    store.activateGeneration(generationProfile);
+    expect(store.activeGenerationFingerprint()).toBe(generationFingerprint(generationProfile));
+    const next = store.createJob(record.id, true);
+    expect(next.generationFingerprint).toBe(generationFingerprint(generationProfile));
+
+    // 生成身分是工作的一部分：一旦釘住就不能改寫，也不能悄悄升級成目前設定。
+    expect(() => store.saveJob({ ...legacy, generationFingerprint: "other" })).toThrow(AppError);
+    expect(() =>
+      store.saveJob({ ...next, generationFingerprint: "other", status: "failed" }),
+    ).toThrow(AppError);
+    expect(store.getJob(legacy.id).generationFingerprint).toBeNull();
+    expect(store.getJob(next.id).generationFingerprint).toBe(
+      generationFingerprint(generationProfile),
+    );
+  });
+
+  test("讀不出來的草稿大聲失敗，不會被當成沒有草稿", () => {
+    store.saveGenerationProfile({ revision: 0, profile: generationProfile });
+    // 直接改寫成不支援的協定：模擬舊版留下或手動改過的列。
+    const raw = new Database(join(dataDir, "store.sqlite"));
+    raw.run("UPDATE generation_profiles SET data = ? WHERE revision = 1", [
+      JSON.stringify({
+        protocol: "anthropic",
+        baseUrl: "https://generation.example/v1",
+        model: "example-model",
+        authMode: "bearer",
+      }),
+    ]);
+    raw.close();
+
+    expect(() => store.stagedGeneration()).toThrow(AppError);
+    expect(() => store.stagedGeneration()).toThrow(/無法解讀/);
+  });
+
+  test("開機掃描只停止未完成且生成身分不符的工作", async () => {
+    // 未啟用時建立：舊版資料庫的形狀，沒有生成身分。
+    const { job: legacy } = await store.ingest(buildRequest(), buildConversation());
+
+    store.activateGeneration(generationProfile);
+    const second = buildConversation("第二版結論：改以操作識別作為發布識別。");
+    const { job: matching } = await store.ingest(buildRequest(JSON.stringify(second)), second);
+    const finished = store.createJob(matching.importId, true);
+    store.saveJob({ ...finished, status: "complete" });
+
+    store.activateGeneration({ ...generationProfile, model: "another-model" });
+    const switched = store.createJob(matching.importId, true);
+    store.saveJob({
+      ...switched,
+      status: "retry-wait",
+      nextAttemptAt: new Date(0).toISOString(),
+    });
+    store.activateGeneration(generationProfile);
+
+    store.stopStaleGenerationJobs();
+
+    // 未完成的舊工作（含尚未開始抽取的）與換過供應商的工作都停止，且不再排入重試。
+    for (const stopped of [legacy, switched]) {
+      const job = store.getJob(stopped.id);
+      expect(job.status).toBe("failed");
+      expect(job.error?.code).toBe("generation_config_changed");
+      expect(job.error?.retryable).toBe(false);
+      expect(job.nextAttemptAt).toBeNull();
+    }
+    // 已完成的執行與身分相符的工作不受影響，既有進度與稽核都保留。
+    expect(store.getJob(finished.id).status).toBe("complete");
+    expect(store.getJob(matching.id).status).toBe("queued");
+    expect(store.jobs()).toHaveLength(4);
+    expect(store.audits().some((row) => row.action === "recovery.generation-changed")).toBe(true);
+  });
+});
+
+test("第三版資料庫遷移後保留既有列，未完成工作因缺少生成身分而停止", async () => {
+  const dataDir = tempDataDir();
+  try {
+    const before = new Store(dataDir);
+    const { job, import: record } = await before.ingest(buildRequest(), buildConversation());
+    const candidate = buildCandidate({
+      id: "candidate-legacy",
+      logicalId: "logical-legacy",
+      jobId: job.id,
+      importId: record.id,
+    });
+    before.saveCandidate(candidate);
+    before.close();
+
+    // 降回第三版：拿掉生成設定表與工作指紋欄位，模擬尚未遷移的舊安裝。
+    const raw = new Database(join(dataDir, "store.sqlite"));
+    raw.run("DROP TABLE generation_profiles");
+    raw.run("ALTER TABLE jobs DROP COLUMN generationProfile");
+    raw.run("PRAGMA user_version = 3");
+    raw.close();
+
+    const upgraded = new Store(dataDir);
+    try {
+      // 既有候選與工作完整保留，只是沒有生成身分；舊資料庫也沒有草稿。
+      expect(upgraded.getCandidate(candidate.id).id).toBe(candidate.id);
+      expect(upgraded.getJob(job.id).generationFingerprint).toBeNull();
+      expect(upgraded.stagedGeneration()).toBeNull();
+
+      upgraded.activateGeneration(generationProfile);
+      upgraded.stopStaleGenerationJobs();
+      // 不猜測舊工作的供應商：未完成的工作一律停下來等人工重新處理。
+      const stopped = upgraded.getJob(job.id);
+      expect(stopped.status).toBe("failed");
+      expect(stopped.error?.code).toBe("generation_config_changed");
+      expect(upgraded.getCandidate(candidate.id).status).toBe(candidate.status);
+    } finally {
+      upgraded.close();
+    }
+  } finally {
+    rmSync(dataDir, { recursive: true, force: true });
+  }
 });
 
 describe("Store 操作對帳與重啟復原", () => {

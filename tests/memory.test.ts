@@ -7,7 +7,6 @@ import {
   type Candidate,
   type Conversation,
   captureResponseSchema,
-  GENERATION_MODEL,
   type ImportRequest,
   type Judgment,
   type Operation,
@@ -16,11 +15,12 @@ import {
 } from "../src/contracts";
 import { search } from "../src/memory";
 import { Worker } from "../src/pipeline/worker";
+import { DEFAULT_GENERATION_BASE_URL, DEFAULT_GENERATION_MODEL } from "../src/providers/generation";
 import { createApp } from "../src/server/app";
 import type { Config } from "../src/server/config";
 import { AGENT_ATTR, AGENT_OWNER, type BlockReadback, SiyuanClient } from "../src/siyuan/client";
 import { normalizeImport } from "../src/sources";
-import { digest } from "../src/storage/identity";
+import { digest, generationFingerprint } from "../src/storage/identity";
 import { Store } from "../src/storage/store";
 
 const cleanups: Array<() => void> = [];
@@ -55,7 +55,14 @@ function setup(adapter = true) {
     port: 8787,
     hostname: "127.0.0.1",
     publicOrigin: "http://localhost:8787",
-    ollamaKey: null,
+    activeGeneration: {
+      protocol: "openai-compatible",
+      baseUrl: DEFAULT_GENERATION_BASE_URL,
+      model: DEFAULT_GENERATION_MODEL,
+      authMode: "bearer",
+    },
+    generationKey: null,
+    generationCredentialOrigin: new URL(DEFAULT_GENERATION_BASE_URL).origin,
     jevKey: null,
     siyuanUrl: "",
     siyuanToken: null,
@@ -63,6 +70,8 @@ function setup(adapter = true) {
     ...(adapter ? { adapterToken: TOKEN, adapterProjects: [PROJECT] } : {}),
   };
   const store = new Store(dataDir);
+  // 開機凍結：手動匯入與自動擷取的工作都用同一個生成身分。
+  store.activateGeneration(config.activeGeneration);
   const worker = new Worker(store, config);
   cleanups.push(() => rmSync(dataDir, { recursive: true, force: true }));
   cleanups.push(() => store.close());
@@ -217,7 +226,7 @@ async function publish(store: Store, options: PublishOptions): Promise<NoteFixtu
       uncertainties: [],
       evidence: [{ messageId: "m1", quote: options.title }],
     },
-    generation: { model: GENERATION_MODEL, promptVersion: PROMPT_VERSION, usage: {} },
+    generation: { model: DEFAULT_GENERATION_MODEL, promptVersion: PROMPT_VERSION, usage: {} },
     judgment: RETAIN,
     status: options.status ?? "published",
     operationId: null,
@@ -501,13 +510,52 @@ test("自動擷取端點需要轉接器憑據，且只受理允許清單內已�
 
   const accepted = await app(post("/api/capture", body, TOKEN));
   expect(accepted.status).toBe(201);
-  expect(captureResponseSchema.parse(await accepted.json())).toEqual({
+  const receipt = captureResponseSchema.parse(await accepted.json());
+  expect(receipt).toEqual({
     captureId: "capture-1",
     importId: expect.any(String),
     jobId: expect.any(String),
     duplicate: false,
   });
   expect(store.jobs()).toHaveLength(1);
+  // 自動擷取與手動匯入釘的是同一個生效生成身分：來源不同，生成身分只有一個權威。
+  expect(store.getJob(receipt.jobId).generationFingerprint).toBe(
+    generationFingerprint(config.activeGeneration),
+  );
+  const imported = await store.ingest(
+    {
+      format: "conversation",
+      content: "手動匯入",
+      projectId: PROJECT,
+      source: "manual",
+      sourceLocator: null,
+    },
+    {
+      schemaVersion: 1,
+      source: "manual",
+      sourceSessionId: "manual-session",
+      projectId: PROJECT,
+      startedAt: null,
+      sourceLocator: null,
+      warnings: [],
+      messages: [
+        {
+          sourceMessageId: "manual-1",
+          parentId: null,
+          role: "user",
+          timestamp: null,
+          text: "手動匯入",
+          attachments: [],
+          rawLocator: "messages/0",
+          missing: [],
+          truncated: false,
+        },
+      ],
+    },
+  );
+  expect(imported.job.generationFingerprint).toBe(
+    store.getJob(receipt.jobId).generationFingerprint,
+  );
 });
 
 test("同一擷取識別碼的內容不可變更，重送相同內容回覆原受理", async () => {

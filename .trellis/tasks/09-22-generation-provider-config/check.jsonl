@@ -1,0 +1,4 @@
+{"file":".trellis/spec/backend/index.md","reason":"Backend quality entry point; read Runtime Contracts provider, durable work and section 6 machine checks by range on demand. The full contract exceeds context injection byte cap."}
+{"file":".trellis/spec/frontend/index.md","reason":"Frontend quality check for profile editor."}
+{"file":".trellis/spec/frontend/control-panel.md","reason":"Review dirty-state preservation, secret absence and real browser behavior."}
+{"file":".trellis/spec/guides/cross-layer-thinking-guide.md","reason":"Review profile-to-job and UI-to-API boundaries independently."}

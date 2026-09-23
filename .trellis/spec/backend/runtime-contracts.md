@@ -9,9 +9,10 @@ Required when changing `src/contracts`, ingestion, storage, providers, worker, H
 - `normalizeImport(request: ImportRequest): Conversation`; `scanOmpRoot(root, projectId): AsyncGenerator<OmpScanItem>`.
 - `Store.ingest(request, conversation)` preserves raw snapshots and returns `{ import, job, duplicate }`.
 - `Store.commitExtractionSegment(job, candidates)` commits the entire segment and its **post-commit** cursor atomically. No network await inside a SQLite transaction.
-- `OllamaClient.extract(...)` and `JevClient.judge(...)` validate external responses before returning typed results. There is no parallel mental-model generator.
+- `GenerationClient.extract(conversation)` selects one validated `openai-compatible` (`/chat/completions`) or native `ollama` (`/api/chat`) transport while sharing prompts, local output/evidence checks and one bounded repair. `JevClient.judge(...)` remains the sole retention and publication decision.
 - `SiyuanWriter.plan(candidate, destination, source, appendDocumentId?)` returns an immutable operation plan; `execute(operation)` reconciles or sends it; `undo(operation)` deletes only a matching owned addition.
 - `POST /api/candidates/:id/review` returns `{ candidateId, jobId }`, not a void response. `PUT /api/settings` returns the new `Settings` revision.
+- `Store.stagedGeneration(): { profile, revision } | null`; `Store.saveGenerationProfile({ revision, profile })` is independent CAS; `Store.activateGeneration(profile)` pins the startup fingerprint before `Worker` accepts work. `PUT /api/generation-profile` accepts `{ revision, profile }` and returns `{ active, staged, revision, pendingRestart, credentialConfigured }` without secrets.
 - `Store.ingestCapture({ captureId, payloadDigest, branchLeafId, request, conversation })` returns a discriminated `created` / `replay` / `conflict` result. It owns the capture receipt and ingestion transaction.
 - `POST /api/capture`: `{ schemaVersion: 1, captureId, branchLeafId, conversation }` → `{ captureId, importId, jobId, duplicate }`; automatic capture accepts original user/assistant messages only.
 - `POST /api/search`: `{ projectId, query, limit?, maxChars? }` → `{ projectId, notes, truncated }`. Notes include current block/document IDs, candidate/operation IDs, revision, edit/truncation flags, and original source/message identities. `/api/recall` and mental-card routes are removed, not aliased.
@@ -26,7 +27,11 @@ Source identity, source revision, message revision, job run, candidate lineage, 
 
 Polling reads only direct regular JSONL files from an explicitly enabled server-allowed root. Refuse symlink roots and open children with `O_NOFOLLOW`. Read at most the checked file size, bounded by 64 MiB; growing files cannot trigger an unbounded read. Yield one file at a time, preserve per-file errors, and continue with siblings. Polling consumes newline-committed records; malformed complete lines are not treated as pending tails. Preserve parent IDs, missing parents, cycles, attachments, unknown metadata, and truncation as observable information.
 
-`Job.extractionPlan` fingerprints the actual segmented/redacted input plus prompt version. A resume cannot change a non-null plan, rewind its cursor, regress completion, or commit only part of a segment. A replayed segment batch fails; no partial-subset success shortcut. Candidate histories are append-only. `saveJob` updates an existing identity, never creates or moves one. Retired `mental_cards` rows/table remain on disk without active reader, writer, provider, public API or UI.
+`Job.extractionPlan` fingerprints the segmented/redacted input, prompt version and configured generation protocol, URL and model; the separate creation-time `generationFingerprint` also covers auth mode before the first segment. Every resumed job rechecks its pinned identity, including jobs whose extraction is already complete but whose Jev or publication remains pending. A resume cannot change a non-null plan, rewind its cursor, regress completion, or commit only part of a segment. A replayed segment batch fails; no partial-subset success shortcut. Candidate histories are append-only. `saveJob` updates an existing identity, never creates or moves one. `mental_cards` retains historical rows without an active read/write path.
+
+SQLite schema v4 adds `generation_profiles(revision, data, createdAt)` and nullable `jobs.generationProfile`. The job DTO exposes `generationFingerprint`; `Store.createJobInTx` binds the boot-activated hash of `[protocol, baseUrl, model, authMode]` for manual import, capture, polling and reprocess. Credentials are never hashed into the job identity or stored in the profile. Legacy `NULL` means unknown, never implicit approval to change provider. After `recoverInterrupted`, `stopStaleGenerationJobs` fails every unfinished mismatched/unknown job as `generation_config_changed` before provider/Jev/SiYuan calls; ordinary retry refuses the mismatch, explicit reprocess creates a new run. Existing candidates and immutable receipts remain.
+
+`PUT /api/generation-profile` only validates and synchronously writes the separate staged CAS record; it must not take `worker.exclusive()`. Staging while extraction or scanning is active succeeds without changing the running client's boot profile, current job fingerprint or newly created jobs' fingerprint. Ordinary policy/destination settings still use their existing worker exclusivity boundary.
 
 ### Automatic publication capture and explicit current-note search
 
@@ -72,7 +77,7 @@ Runtime and installer share `serviceOriginSchema` and the 8,192-byte token limit
 
 ### Providers and policy
 
-- Knowledge generation uses `GENERATION_MODEL = "deepseek-v4.1-flash"` at `https://ollama.com/api/chat`. Require a final assistant response with `done: true` and the approved model (`:cloud` suffix accepted). No local endpoint, fallback model, tools, assumed remote JSON Schema enforcement, or extra mental-generation request.
+- Knowledge extraction uses a boot-frozen `GenerationProfile` (`protocol`, `baseUrl`, `model`, `authMode`). The approved transports are OpenAI-compatible `/chat/completions` and native Ollama `/api/chat`; the default is `openai-compatible` at `http://127.0.0.1:7861/antigravity/v1` with `gemini-3.7-flash-medium` and `bearer`. OpenAI-compatible responses require a final assistant message with `finish_reason: stop`; native Ollama requests use `stream:false` and require `done:true`, with `done_reason: stop` if present. Both require the exact selected model ID; report the available provider-native usage. No silent provider/model fallback, redirects, assumed remote JSON Schema enforcement or automatic SiYuan recall.
 - Validate final JSON locally, allow one bounded repair, and validate evidence quotes as exact substrings of the offered source messages. Segmentation never silently discards the end of a conversation.
 - Jev uses `https://api.typesafe.ai/v1/systemone`, alias `jev-latest`; record the actual response model. Require all requested typed answers, known enum keys, valid distributions (sum tolerance `1e-6`), consistent argmax and weighted score, and the declared score legend.
 - Jev sensitivity applies only to proposed `candidate`, `evidence` and `cited_messages`. `related_notes` remains available for duplicate/conflict judgment, but its navigation links/provenance are not newly proposed content. No parallel `prior_mental` input. Do not strip arbitrary URLs or lower thresholds to compensate for background contamination.
@@ -93,7 +98,9 @@ If standard Markdown HTML still differs on first verification, read the same blo
 
 Fences inside blockquotes also protect literal content. Pair fence delimiters by quote depth and marker, not the raw whitespace prefix: opening/closing indentation and spaces after `>` may differ legally. Regression inputs must cover top-level three-space opening versus zero-space closing, and `> ` versus `>` at the same quote depth.
 
-`OLLAMA_API_KEY`, `TYPESAFE_API_KEY`, `SIYUAN_TOKEN` accept `_FILE` alternatives; direct values take precedence. `PUBLIC_ORIGIN` must match request host/origin. `SIYUAN_URL` is server-facing; optional `SIYUAN_PUBLIC_URL` is browser-facing and must not contain credentials. Compose publishes loopback-only and uses a persistent volume. One publisher per data directory; no distributed worker claims are implemented.
+`GENERATION_PROTOCOL` (`openai-compatible` or `ollama`), `GENERATION_BASE_URL`, `GENERATION_MODEL` and `GENERATION_AUTH_MODE` (`bearer` or `none`) supply initial server selection. Panel `PUT /api/generation-profile` stores only a separately revisioned non-secret draft; restart validates and activates it before the worker starts. Invalid/corrupt drafts stop startup rather than falling back. `none` permits only literal loopback IP destinations (`127.0.0.0/8`, `[::1]`) and sends no Authorization, even if a key is present. `bearer` requests require `GENERATION_API_KEY` or `_FILE` and exact `GENERATION_API_KEY_ORIGIN` binding (default: environment base URL's origin); a missing key fails the request without fallback. Switching origin requires explicit server configuration, and remote bearer requires HTTPS. Reject embedded credentials, query/fragment, unsupported schemes/protocols, model substitution and redirects. `TYPESAFE_API_KEY` and `SIYUAN_TOKEN` accept `_FILE` alternatives. `PUBLIC_ORIGIN` must match request host/origin. `SIYUAN_URL` is server-facing; optional `SIYUAN_PUBLIC_URL` is browser-facing and credential-free. Compose uses host networking for loopback generation and binds the app to `127.0.0.1`; keep the persistent volume and one publisher per data directory. Never expose the unauthenticated panel or mount OMP OAuth storage.
+
+URL validation rejects literal `?` and `#` delimiters even when the query or fragment is empty: `new URL(".../v1?").search` is empty, but string-concatenating `/chat/completions` would otherwise turn it into a query, not a path. Never assume the parsed `search`/`hash` truthiness catches these cases.
 
 ## 4. Validation & Error Matrix
 
@@ -102,6 +109,10 @@ Fences inside blockquotes also protect literal content. Pair fence delimiters by
 | Missing key / malformed output / missing Jev answer | Visible failure; no write plan or default retention |
 | Excluded source or fabricated quote | Stop before unsafe cloud use or publication |
 | Changed policy or extraction plan mid-run | Fail closed; explicit reprocessing required |
+| Malformed/stale generation draft or different configured origin at restart | Fail startup visibly; do not silently run the previous provider |
+| Generation job fingerprint unknown/mismatched, even before extraction | Mark failed `generation_config_changed`; ordinary retry 409; explicit reprocess only |
+| Profile CAS revision changed in another tab | `revision_conflict` / 409; preserve unsent draft and policy revision |
+| Unsupported protocol, remote no-auth/plaintext bearer, redirect or different reported model | Reject before unsafe request or publication; never substitute another endpoint |
 | Repeated raw source revision | Existing ingestion/job; no new publication |
 | Uncertain write, block not yet found | `write_outcome_unknown`; no repeat mutation |
 | Read-back identity/content mismatch | `siyuan_conflict`; no receipt accepted |
@@ -135,12 +146,19 @@ SiYuan has no atomic conditional delete. A human mutation between the last check
 - Bad: interpret a missing/invalid judgment or a transport failure as permission to retain.
 - Bad: scope only the child block, or apply `limit` after reading every historical publication.
 - Good: a concurrent conflicting capture loses before any import/job is committed; a lost response replays the original receipt.
+- Good: stage a native Ollama no-auth profile, continue under the current boot profile, then restart and explicitly reprocess old unfinished work under the new fingerprint.
+- Base: an unchanged OpenAI-compatible profile uses the default Antigravity endpoint and keeps Jev's retention gate intact.
+- Bad: an old job with a null fingerprint proceeds under the new provider, or a redirect forwards a bearer key to another destination.
 
 ## 6. Required Verification
 
 `bun run typecheck && bun test && bun run build && bun run lint`.
 
 Preserve behavioral regressions in `tests/sources.test.ts`, `storage.test.ts`, `providers.test.ts`, `pipeline.test.ts`, and `writer.test.ts`. Assert fail-closed publication, full-segment atomicity, revision conflicts, no duplicate mutation, and preservation of changed human content. Do not pin incidental wording or source-code text.
+
+`tests/providers.test.ts` must exercise both real loopback wire entry points and their request path/model/auth header, final-response completeness, model mismatch, origin pinning, no-auth header omission and provider-native usage. A real 307 response to a separate loopback sink must produce zero destination requests and no forwarded Authorization header. Empty terminal `?`/`#` delimiters must fail both bearer and no-auth endpoint construction before sending. `tests/storage.test.ts` and `tests/pipeline.test.ts` must cover v3→v4 migration, staged CAS distinct from policy, never-started and partial legacy/mismatched jobs, retry refusal, new-run fingerprint and unchanged receipts; profile API must reject those empty delimiters. `tests/memory.test.ts` must confirm capture and manual import pin the same active fingerprint. Browser-check active/staged/restart state, unsent edits, consecutive saves and cross-tab conflicts with no secret in API/DOM; use isolated storage and no real provider or SiYuan destination.
+
+`tests/pipeline.test.ts` must hold a real worker extraction promise open, stage a new profile through the actual route (HTTP 200), and assert both the active job and a newly created job retain the startup fingerprint before releasing the worker. A `worker_busy` response here violates the staged-config contract.
 
 `tests/memory.test.ts` covers capture transaction failure/competing payloads, native search parsing, parent-document authorization, changes during network waits, bounded reads, current human edits and withdrawn publications. Real-service acceptance exercises the actual search route, not only injected search fixtures.
 
@@ -154,12 +172,13 @@ After changing judgment question boundaries, use alternating real-provider contr
 
 Machine scope checks with the built-in `grep` tool (repeat at review/delivery):
 
-- `path="src/providers;src/contracts/index.ts;src/pipeline/worker.ts"`, `pattern="deepseek-v4\\.1-flash|ollama\\.com|systemone|disposition !=="`.
+- `path="src/providers;src/contracts/index.ts;src/pipeline/worker.ts"`, `pattern="deepseek-v4\\.1-flash|ollama\\.com|chat/completions|unexpected_model|systemone|disposition !=="`: inspect configured generation wire, rejected model substitution, and Jev's unchanged gate; old provider constants should not remain.
+- `path="src/providers/generation.ts;src/providers/support.ts;src/server/config.ts;src/server/app.ts;src/storage/store.ts;src/pipeline/worker.ts"`, `pattern="GENERATION_PROTOCOL|GENERATION_API_KEY_ORIGIN|generationFingerprint|generation_config_changed|generationProfileStatusSchema|redirect: .error.|baseUrl.includes"`: inspect staged/active pinning, exact credential origin, redirect refusal, empty-delimiter guard and fail-closed old work. Do not use match counts as proof; trace creation, restart and retry paths.
 - `path="src/storage;src/siyuan/writer.ts"`, `pattern="commitExtractionSegment|expectedAttributes|checkReceipt|write_outcome_unknown|UNIQUE"`.
 - `path="src/memory;src/storage/store.ts"`, `pattern="ingestCapture|publicationsByOperations|MAX_SEARCH_OPERATIONS|currentDestination"`: inspect atomic acceptance, pre-read bounds and post-await authorization.
 - `path="integrations/omp;scripts"`, `pattern="SESSION_STATE_VERSION|CONSUMED_LIMIT|siyuan_search|session_shutdown|ADAPTER_MANIFEST"`: inspect durable identity limits, explicit search, lifecycle completion and build freshness.
 - `path="src;web;scripts;tests;integrations"`, `pattern="as any\\b|: any\\b|@ts-ignore|@ts-nocheck|innerHTML\\s*="`: no implementation matches.
-- `path="src;web;integrations;scripts"`, `pattern="mental|Mental|recall|Recall|before_agent_start"`: only legacy-history retention/migration, envelope exclusion and explanatory no-hook comments may remain; no active mental generator/API/UI or automatic search hook.
+- `path="src;web;integrations;scripts"`, `pattern="mental|Mental|recall|Recall|before_agent_start"`: only legacy-history retention/migration, envelope exclusion and explanatory no-hook comments may remain; no active mental-card writes or automatic SiYuan recall.
 - `path="integrations/omp;scripts/setup-omp.ts"`, `pattern="serviceOriginSchema|MAX_TOKEN_BYTES|pendingCorruption|capture_ack_mismatch|provenanceValue|signal.*aborted|config\\.yaml"`: inspect shared validation, acknowledgement identity, cancellation and inherited configuration resolution.
 - `path="src/siyuan;tests/writer.test.ts"`, `pattern="getTextMarkKramdown|textMarks|native textmark"`: inspect read-only fallback, same-block identity, narrowly converted markup and preserved exact receipts.
 
@@ -172,6 +191,16 @@ Machine scope checks with the built-in `grep` tool (repeat at review/delivery):
 
 // Correct: execute reuses the durable operation and reserved target.
 await writer.execute(store.getOperation(operationId));
+```
+
+Generation cutover: wrong—treat `jobs.generationProfile IS NULL` as the current profile, or apply a staged profile to a running worker. Correct—pin the active fingerprint when each job is created; on restart fail unknown/mismatched unfinished jobs and require explicit reprocessing. This prevents an unstarted job from silently sending old source material to a new endpoint.
+
+```ts
+// Correct startup order: stage is read once, then the active identity is pinned.
+const config = resolveGeneration(environment, store.stagedGeneration()?.profile ?? null);
+store.activateGeneration(config.activeGeneration);
+const worker = new Worker(store, config);
+worker.start(); // recovers interrupted work, then stops stale identities
 ```
 
 Root-cause record: literal Markdown comparison assumed the external serializer preserved spacing (cross-layer contract / coverage gap). Removing only IALs fixed one example but not headings adjacent to lists. The same-engine rendering comparison fixes the semantic boundary without weakening exact-receipt undo. See the task acceptance record for pre-fix failure and real post-fix evidence.

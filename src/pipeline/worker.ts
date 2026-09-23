@@ -2,18 +2,20 @@ import {
   AppError,
   type Candidate,
   type ErrorInfo,
+  type GenerationProfile,
+  generationProfileSchema,
   type Job,
   type Operation,
   PROMPT_VERSION,
   validateEvidence,
 } from "../contracts";
+import { GenerationClient } from "../providers/generation";
 import { JevClient } from "../providers/jev";
-import { OllamaClient } from "../providers/ollama";
 import type { Config } from "../server/config";
 import { SiyuanClient } from "../siyuan/client";
 import { SiyuanWriter } from "../siyuan/writer";
 import { normalizeImport, redactConversation, scanOmpRoot, segmentConversation } from "../sources";
-import { digest } from "../storage/identity";
+import { digest, generationFingerprint } from "../storage/identity";
 import type { Store } from "../storage/store";
 
 export function errorInfo(error: unknown, stage: string): ErrorInfo {
@@ -28,10 +30,16 @@ export function errorInfo(error: unknown, stage: string): ErrorInfo {
 }
 
 export class Worker {
-  readonly ollama: OllamaClient;
+  readonly generation: GenerationClient;
   readonly jev: JevClient;
   readonly siyuan: SiyuanClient;
   readonly writer: SiyuanWriter;
+  /**
+   * 開機凍結的生成選擇與其指紋。這一輪執行只用這一份：面板儲存的草稿、其他分頁的
+   * 變更或設定檔的改動都不會影響正在執行與之後建立的工作。
+   */
+  private readonly generationProfile: GenerationProfile;
+  private readonly generationIdentity: string;
   activeJobId: string | null = null;
   private timer: NodeJS.Timeout | undefined;
   private stopped = true;
@@ -43,13 +51,20 @@ export class Worker {
     readonly store: Store,
     readonly config: Config,
   ) {
+    this.generationProfile = generationProfileSchema.parse(config.activeGeneration);
+    this.generationIdentity = generationFingerprint(this.generationProfile);
     const onUsage = (meta: {
       model: string;
       usage: Record<string, number>;
       promptVersion?: string;
       policyRevision?: number;
     }) => store.audit("provider-usage", this.activeJobId ?? "worker", JSON.stringify(meta));
-    this.ollama = new OllamaClient({ apiKey: config.ollamaKey, onUsage });
+    this.generation = new GenerationClient({
+      ...this.generationProfile,
+      apiKey: config.generationKey,
+      credentialOrigin: config.generationCredentialOrigin,
+      onUsage,
+    });
     this.jev = new JevClient({ apiKey: config.jevKey, onUsage });
     this.siyuan = new SiyuanClient({ url: config.siyuanUrl, token: config.siyuanToken });
     this.writer = new SiyuanWriter(
@@ -61,6 +76,9 @@ export class Worker {
 
   start(): void {
     this.store.recoverInterrupted();
+    // 重啟後才發現生效設定不同時，未完成的工作（含尚未開始抽取的）在第一次外部呼叫
+    // 之前就停止，不會被新供應商偷偷續作；改用目前設定必須由使用者明示重新處理。
+    this.store.stopStaleGenerationJobs();
     this.stopped = false;
     this.schedule(0);
   }
@@ -128,6 +146,7 @@ export class Worker {
       job.nextAttemptAt = null;
       this.updateJob(job, "extracting");
       this.assertPolicy(job);
+      this.assertGeneration(job);
       const source = this.store.getImport(job.importId);
       const settings = this.store.settings(job.policyRevision);
       const conversation = redactConversation(source.conversation, settings.policy);
@@ -136,23 +155,27 @@ export class Worker {
         this.store.audit("source-excluded", source.id, "來源符合排除規則，未送往雲端。");
         return;
       }
-      if (!job.extractionComplete) {
-        const segments = segmentConversation(conversation);
-        const plan = digest(
-          JSON.stringify([
-            PROMPT_VERSION,
-            segments.map((segment) => digest(JSON.stringify(segment))),
-          ]),
+      const segments = segmentConversation(conversation);
+      // 抽取完成後仍須核對來源與生成選擇；重啟時不能用新供應商或新模型續作舊工作。
+      const plan = digest(
+        JSON.stringify([
+          PROMPT_VERSION,
+          this.generationProfile.protocol,
+          this.generationProfile.baseUrl,
+          this.generationProfile.model,
+          segments.map((segment) => digest(JSON.stringify(segment))),
+        ]),
+      );
+      if (
+        (job.extractionPlan !== null && job.extractionPlan !== plan) ||
+        (job.extractionPlan === null && (job.nextSegment > 0 || job.extractionComplete))
+      ) {
+        throw new AppError(
+          "extraction_plan_changed",
+          "抽取分段或生成設定已改變，請重新處理，不能沿用舊進度。",
         );
-        if (
-          (job.extractionPlan !== null && job.extractionPlan !== plan) ||
-          (job.extractionPlan === null && job.nextSegment > 0)
-        ) {
-          throw new AppError(
-            "extraction_plan_changed",
-            "抽取分段或提示版本已改變，請重新處理，不能沿用舊進度略過內容。",
-          );
-        }
+      }
+      if (!job.extractionComplete) {
         if (job.extractionPlan === null) {
           job.extractionPlan = plan;
           this.store.saveJob(job);
@@ -162,7 +185,7 @@ export class Worker {
           this.assertPolicy(job);
           const segment = segments[index];
           if (!segment) throw new AppError("missing_segment", "來源分段不存在。");
-          const result = await this.ollama.extract(segment);
+          const result = await this.generation.extract(segment);
           this.assertPolicy(job);
           const batch: Candidate[] = [];
           for (const draft of result.candidates) {
@@ -352,6 +375,22 @@ export class Worker {
   private assertPolicy(job: Job): void {
     if (this.store.settings().revision !== job.policyRevision) {
       throw new AppError("policy_changed", "設定版本已變更，請重新處理以使用最新規則。");
+    }
+  }
+
+  /**
+   * 每件工作只能在建立它的生成身分下續行。
+   *
+   * 指紋包含協定、端點、模型與認證模式，不含憑據：輪替憑據不會讓舊工作中斷。舊版
+   * 資料庫留下的 `null` 身分一律視為不符。檢查發生在讀取來源、呼叫生成服務與 Jev
+   * 之前，因此不符的工作不會送出任何外部請求，也不會改寫既有候選或已驗證的發布。
+   */
+  private assertGeneration(job: Job): void {
+    if (job.generationFingerprint !== this.generationIdentity) {
+      throw new AppError(
+        "generation_config_changed",
+        "這件工作建立時的生成設定與目前不同，已停止；請重新處理以使用目前設定。",
+      );
     }
   }
 
