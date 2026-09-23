@@ -3,7 +3,7 @@
   "name": "generation-provider-config",
   "title": "生成供應商與模型可配置，保留 Jev 固定判斷",
   "description": "支援 OpenAI 相容及原生 Ollama 生成協定，面板保存非秘密選擇並於重啟啟用；舊工作不跨供應商續跑，Jev 繼續固定負責判斷與發布把關。優先於候選待審自動化。",
-  "status": "in_progress",
+  "status": "completed",
   "dev_type": null,
   "scope": null,
   "package": null,
@@ -11,7 +11,7 @@
   "creator": "chris",
   "assignee": "chris",
   "createdAt": "2026-09-22",
-  "completedAt": null,
+  "completedAt": "2026-09-23",
   "branch": "task/generation-provider-config",
   "base_branch": "master",
   "worktree_path": null,
@@ -31,6 +31,7 @@
   "notes": "2026-09-23 使用者在最終規劃摘要後明確回覆「可以」，授權本任務實作與隔離合成驗證。已啟動 task/generation-provider-config；未授權正式環境變更、真實供應商呼叫、重處理既有資料、commit 或 push。P0 優先於 candidate-review-automation (P1)，Jev 與發布閘門不可變更。",
   "meta": {
     "baselineCommit": "ad78300f552679560413a556ab54557c1db8d8ae",
-    "precedes": "candidate-review-automation"
+    "precedes": "candidate-review-automation",
+    "spec_update": "backend/runtime-contracts.md, frontend/control-panel.md"
   }
 }
